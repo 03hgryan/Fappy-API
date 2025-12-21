@@ -1,21 +1,41 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 import os
 from dotenv import load_dotenv
 
-import models
-from database import engine
-from routers import users
+from fap import models
+from fap.database import engine
+from fap.routers import users, websocket
 
 load_dotenv()
 
 # Only creates when tables do not exist
 models.Base.metadata.create_all(bind=engine)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load ASR model on startup and cleanup on shutdown"""
+    print("🚀 Loading ASR model on startup...")
+    from faster_whisper import WhisperModel
+
+    # Load model once at startup
+    model = WhisperModel("base", device="cpu", compute_type="int8")
+    app.state.asr_model = model
+    print("✅ ASR model loaded and ready")
+
+    yield
+
+    # Cleanup on shutdown
+    print("🔌 Shutting down...")
+
+
 app = FastAPI(
     title="AST - ASR + translation",
     description="FastAPI for AST",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # Security headers for production only
@@ -69,6 +89,12 @@ app.include_router(
     prefix="/api/users",
     tags=["users"],
     responses={404: {"description": "User not found"}},
+)
+
+app.include_router(
+    websocket.router,
+    prefix="/ws",
+    tags=["websocket"],
 )
 
 

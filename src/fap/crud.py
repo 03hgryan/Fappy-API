@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-import models, schemas
+from fap import models, schemas
 import uuid
 
 
