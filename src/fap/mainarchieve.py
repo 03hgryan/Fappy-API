@@ -18,43 +18,12 @@ models.Base.metadata.create_all(bind=engine)
 async def lifespan(app: FastAPI):
     """Load ASR model on startup and cleanup on shutdown"""
     print("🚀 Loading ASR model on startup...")
-    
-    try:
-        import time
-        from fap.asr.factory import load_shared_model
-        
-        start_time = time.time()
-        
-        # Get provider from env (default: whisper)
-        provider = os.getenv("ASR_PROVIDER", "whisper")
-        print(f"📡 ASR Provider: {provider}")
-        
-        # Load shared model
-        app.state.asr_provider = provider
-        app.state.asr_model = load_shared_model(
-            provider=provider,
-            model_size=os.getenv("WHISPER_MODEL_SIZE", "base"),
-        )
-        
-        load_time = time.time() - start_time
-        print(f"✅ ASR ready in {load_time:.1f}s")
-        
-    except Exception as e:
-        print(f"❌ Failed to load ASR: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        # Try fallback to base whisper
-        print("⚠️ Attempting fallback to base Whisper model...")
-        try:
-            from faster_whisper import WhisperModel
-            app.state.asr_provider = "whisper"
-            app.state.asr_model = WhisperModel("base", device="cpu", compute_type="int8")
-            print("✅ Fallback: base Whisper model loaded")
-        except Exception as e2:
-            print(f"❌ Fallback also failed: {e2}")
-            app.state.asr_provider = None
-            app.state.asr_model = None
+    from faster_whisper import WhisperModel
+
+    # Load model once at startup
+    model = WhisperModel("base", device="cpu", compute_type="int8")
+    app.state.asr_model = model
+    print("✅ ASR model loaded and ready")
 
     yield
 
@@ -132,8 +101,4 @@ app.include_router(
 # Health check endpoint
 @app.get("/health")
 async def health_check():
-    return {
-        "status": "healthy",
-        "service": "FastAPI for AST",
-        "asr_provider": getattr(app.state, "asr_provider", None),
-    }
+    return {"status": "healthy", "service": "FastAPI for AST"}

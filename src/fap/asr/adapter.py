@@ -185,9 +185,9 @@ class WhisperAdapter(ASRAdapter):
         self._is_streaming = False
         
         if self._last_hypothesis:
-            # Mark as final
+            # Mark as final - use is_final (standardized flag for SegmentManager)
             final_hypothesis = self._last_hypothesis.copy()
-            final_hypothesis["final"] = True
+            final_hypothesis["is_final"] = True
             self._last_hypothesis = None
             return final_hypothesis
         
@@ -198,8 +198,11 @@ class GoogleAdapter(ASRAdapter):
     """
     Adapter for Google Cloud Speech-to-Text ASR engine.
     
-    Google uses true streaming - it returns interim and final results
-    asynchronously as audio is processed.
+    Google uses true streaming with hypothesis rewriting.
+    
+    Key insight: Engine's feed() returns one result and puts audio in queue.
+    We need to also drain any additional results that accumulated.
+    Final results should be returned before interims.
     """
     
     def __init__(
@@ -209,16 +212,9 @@ class GoogleAdapter(ASRAdapter):
         credentials_path: str | None = None,
         model: str = "latest_long",
     ):
-        """
-        Initialize Google Cloud adapter.
-        
-        Args:
-            language_code: BCP-47 language code
-            sample_rate_hz: Audio sample rate
-            credentials_path: Path to service account JSON
-            model: Recognition model
-        """
         from .google_engine import GoogleCloudASR
+        import queue as queue_module
+        self._queue_module = queue_module
         
         self._engine = GoogleCloudASR(
             language_code=language_code,
@@ -229,6 +225,9 @@ class GoogleAdapter(ASRAdapter):
         self._is_streaming = False
         self._last_hypothesis: dict | None = None
         self._revision = 0
+        
+        # Queue final results that need to be returned
+        self._pending_finals: list[dict] = []
     
     @property
     def provider_name(self) -> str:
@@ -242,47 +241,80 @@ class GoogleAdapter(ASRAdapter):
         """
         Feed audio to Google Cloud and return normalized hypothesis.
         
-        Google returns hypotheses asynchronously - we normalize them
-        to match the expected format.
+        Strategy:
+        1. Return pending finals first (from previous call)
+        2. Call engine.feed() which adds audio AND returns one result
+        3. Drain any additional results from queue
+        4. Process all results: queue finals, keep latest interim
+        5. Return: pending final > latest interim > None
         """
         self._is_streaming = True
         
-        hypothesis = self._engine.feed(audio)
+        # If we have pending finals from last call, return them first
+        if self._pending_finals:
+            result = self._pending_finals.pop(0)
+            self._last_hypothesis = result
+            return result
         
-        if hypothesis:
-            normalized = self._normalize_hypothesis(hypothesis)
-            self._last_hypothesis = normalized
-            return normalized
+        # Feed audio to engine - this adds to queue AND returns one result
+        first_result = self._engine.feed(audio)
+        
+        # Collect all results (first + any others in queue)
+        all_results: list[dict] = []
+        if first_result:
+            all_results.append(first_result)
+        
+        # Drain additional results from queue
+        while True:
+            try:
+                result = self._engine._response_queue.get_nowait()
+                if result:
+                    all_results.append(result)
+            except self._queue_module.Empty:
+                break
+        
+        if not all_results:
+            return None
+        
+        # Separate finals and interims
+        finals = [r for r in all_results if r.get("is_final_from_google", False)]
+        interims = [r for r in all_results if not r.get("is_final_from_google", False)]
+        
+        # Queue all finals (they need to be processed in order)
+        for f in finals:
+            self._revision += 1
+            normalized = self._normalize_hypothesis(f, is_final=True)
+            self._pending_finals.append(normalized)
+        
+        # If we have finals, return the first one
+        if self._pending_finals:
+            result = self._pending_finals.pop(0)
+            self._last_hypothesis = result
+            return result
+        
+        # No finals - return the latest interim
+        if interims:
+            self._revision += 1
+            latest = interims[-1]
+            result = self._normalize_hypothesis(latest, is_final=False)
+            self._last_hypothesis = result
+            return result
         
         return None
     
-    def _normalize_hypothesis(self, hypothesis: dict) -> dict:
-        """
-        Normalize Google hypothesis to standard format.
-        
-        Google's format is similar but may have slight differences.
-        """
-        self._revision += 1
-        
-        # Normalize words format
-        words = []
-        for word_info in hypothesis.get("words", []):
-            words.append({
-                "word": word_info.get("word", ""),
-                "start_ms": word_info.get("start_ms", 0),
-                "end_ms": word_info.get("end_ms", 0),
-                "probability": word_info.get("probability", 0.9),
-            })
-        
+    def _normalize_hypothesis(self, hypothesis: dict, is_final: bool) -> dict:
+        """Normalize hypothesis to standard format."""
+        import time
         return {
             "type": "hypothesis",
             "segment_id": hypothesis.get("segment_id", f"google-{int(time.time() * 1000)}"),
             "revision": self._revision,
             "text": hypothesis.get("text", ""),
-            "words": words,
+            "words": hypothesis.get("words", []),
             "confidence": hypothesis.get("confidence", 0.9),
             "start_time_ms": hypothesis.get("start_time_ms", 0),
             "end_time_ms": hypothesis.get("end_time_ms", 0),
+            "is_final": is_final,
         }
     
     def reset(self) -> None:
@@ -291,18 +323,51 @@ class GoogleAdapter(ASRAdapter):
         self._is_streaming = False
         self._last_hypothesis = None
         self._revision = 0
+        self._pending_finals = []
     
     def finalize(self) -> dict | None:
         """
         Finalize current segment.
         
-        For Google, we return the last hypothesis as final.
+        Important: Google may need time to flush final results.
+        We drain the queue with a short timeout to catch late finals.
         """
+        import time as time_module
+        
         self._is_streaming = False
         
+        # Send silence frame to nudge Google into finalization
+        try:
+            self._engine._audio_queue.put(b"\x00" * 640)  # 20ms of silence
+        except:
+            pass
+        
+        # Drain with timeout - wait up to 500ms for final result
+        deadline = time_module.time() + 0.5
+        while time_module.time() < deadline:
+            try:
+                result = self._engine._response_queue.get(timeout=0.1)
+                if result:
+                    if result.get("is_final_from_google", False):
+                        self._revision += 1
+                        normalized = self._normalize_hypothesis(result, is_final=True)
+                        self._pending_finals.append(normalized)
+                    # Keep draining even for interims
+            except self._queue_module.Empty:
+                # No more results available right now
+                if self._pending_finals:
+                    break  # We have finals, no need to wait more
+                # Brief wait before checking again
+                time_module.sleep(0.05)
+        
+        # Return pending finals first
+        if self._pending_finals:
+            return self._pending_finals.pop(0)
+        
+        # Fallback: return last hypothesis marked as final
         if self._last_hypothesis:
             final_hypothesis = self._last_hypothesis.copy()
-            final_hypothesis["final"] = True
+            final_hypothesis["is_final"] = True  # Standardized flag
             self._last_hypothesis = None
             return final_hypothesis
         

@@ -50,7 +50,9 @@ async def stream(ws: WebSocket):
     
     print(f"🎙️ Using ASR adapter: {asr_adapter.provider_name}")
     
-    segment_manager = SegmentManager()
+    # Create SegmentManager with appropriate mode
+    asr_mode = "rewriting" if provider == "google" else "incremental"
+    segment_manager = SegmentManager(asr_mode=asr_mode)
     global_accumulator = GlobalAccumulator()
     
     pending_metadata = None
@@ -159,8 +161,8 @@ async def stream(ws: WebSocket):
                             
                             print(f"🏁 Segment boundary - finalized: \"{final_output['rendered_text']['stable']}\"")
                         
-                        # Reset for new segment
-                        segment_manager = SegmentManager()
+                        # Reset for new segment (preserve asr_mode!)
+                        segment_manager = SegmentManager(asr_mode=asr_mode)
                         print(f"🆕 New segment: {hypothesis['segment_id']}")
 
                     current_segment_id = hypothesis["segment_id"]

@@ -20,7 +20,7 @@ class WhisperASR(ASREngine):
 
     def __init__(
         self,
-        model_size: str = "medium",
+        model_size: str = "base",
         device: str = "auto",
         model: Any = None,
         buffer_duration_ms: int = 2000,

@@ -2,8 +2,9 @@
 """
 Segment stability management using word-level timestamps.
 
-Key insight: Track ALL word candidates for each audio region,
-then pick the BEST one (highest probability) when locking.
+Supports two ASR modes:
+- "incremental" (Whisper): Words are prefix-stable, track candidates per region
+- "rewriting" (Google): Hypothesis rewrites entirely, only trust is_final
 
 Output Schema (the critical contract):
 - finalized_words: Words that JUST became final this revision (append these!)
@@ -61,11 +62,16 @@ class SegmentManager:
     """
     Manages segment stability using word-level timestamps.
 
+    Supports two ASR modes:
+    - "incremental" (Whisper): Words are prefix-stable, track candidates per region
+    - "rewriting" (Google): Hypothesis rewrites entirely, only trust is_final
+
     Core responsibilities:
-    1. Group words by overlapping time regions
-    2. Track all candidate transcriptions per region
-    3. Select best candidate (highest probability) when locking
-    4. Expose structured output with clear stability boundaries
+    1. Group words by overlapping time regions (incremental mode)
+    2. Track all candidate transcriptions per region (incremental mode)
+    3. Select best candidate (highest probability) when locking (incremental mode)
+    4. Replace unstable text until final (rewriting mode)
+    5. Expose structured output with clear stability boundaries
     
     Downstream code should:
     - ONLY append finalized_words to permanent storage
@@ -73,16 +79,20 @@ class SegmentManager:
     - NEVER diff strings to determine what changed
     """
 
-    def __init__(self, lock_margin_ms: int = 100):
+    def __init__(self, lock_margin_ms: int = 100, asr_mode: str = "incremental"):
         """
         Initialize segment manager.
         
         Args:
             lock_margin_ms: Extra margin when checking if word exited buffer
+            asr_mode: "incremental" (Whisper) or "rewriting" (Google)
         """
-        self.lock_margin_ms = lock_margin_ms
+        assert asr_mode in ("incremental", "rewriting"), f"Invalid asr_mode: {asr_mode}"
         
-        # Word candidates grouped by audio region
+        self.lock_margin_ms = lock_margin_ms
+        self.asr_mode = asr_mode
+        
+        # Word candidates grouped by audio region (incremental mode only)
         # Each region: {"start_ms", "end_ms", "candidates": [...]}
         self.word_regions: list[dict] = []
         
@@ -91,26 +101,28 @@ class SegmentManager:
         
         # Track segment ID for consistent identification
         self.segment_id: str | None = None
+        
+        print(f"🎛️ SegmentManager initialized: asr_mode={asr_mode}")
 
     def ingest(self, hypothesis: dict) -> SegmentOutput:
         """
         Process hypothesis, track word candidates, and emit structural stability updates.
 
         Args:
-            hypothesis: Hypothesis dict from StreamingASR containing:
+            hypothesis: Hypothesis dict from ASR containing:
                 - segment_id: str
-                - text: str (fallback when no word timestamps)
+                - text: str (full transcript text)
                 - words: list of word dicts with timing
                 - start_time_ms: buffer start
                 - end_time_ms: buffer end
                 - revision: int
+                - is_final: bool (for rewriting mode)
 
         Returns:
             SegmentOutput with clear stability boundaries
         """
         revision = hypothesis.get("revision", 0)
         segment_id = hypothesis.get("segment_id", "unknown")
-        new_words = hypothesis.get("words", [])
         buffer_start_ms = hypothesis.get("start_time_ms", 0)
         buffer_end_ms = hypothesis.get("end_time_ms", buffer_start_ms + 2000)
 
@@ -118,10 +130,147 @@ class SegmentManager:
         if self.segment_id is None:
             self.segment_id = segment_id
 
+        # ============================================================
+        # 🔁 REWRITING MODE (Google Cloud Speech)
+        # ============================================================
+        if self.asr_mode == "rewriting":
+            return self._ingest_rewriting_mode(
+                hypothesis, revision, segment_id, buffer_start_ms, buffer_end_ms
+            )
+
+        # ============================================================
+        # 📝 INCREMENTAL MODE (Whisper / faster-whisper)
+        # ============================================================
+        return self._ingest_incremental_mode(
+            hypothesis, revision, segment_id, buffer_start_ms, buffer_end_ms
+        )
+
+    # ================================================================
+    # REWRITING MODE (Google Cloud Speech)
+    # ================================================================
+
+    def _ingest_rewriting_mode(
+        self, 
+        hypothesis: dict, 
+        revision: int, 
+        segment_id: str,
+        buffer_start_ms: int,
+        buffer_end_ms: int,
+    ) -> SegmentOutput:
+        """
+        Handle Google-style rewriting ASR.
+        
+        Each hypothesis REPLACES the previous one entirely.
+        Only trust words when is_final=True.
+        
+        Key insight: Google owns the hypothesis until it marks it final.
+        We don't try to track word regions or do any diffing.
+        """
+        text = hypothesis.get("text", "").strip()
+        words = hypothesis.get("words", [])
+        is_final = hypothesis.get("is_final", False)
+        
+        finalized_words: list[WordInfo] = []
+        unstable_words: list[WordInfo] = []
+        
+        if is_final and words:
+            # ✅ Final result with word timestamps - lock all words
+            for w in words:
+                word_info: WordInfo = {
+                    "word": w.get("word", ""),
+                    "start_ms": w.get("start_ms", buffer_start_ms),
+                    "end_ms": w.get("end_ms", buffer_end_ms),
+                    "probability": w.get("probability", 1.0),
+                }
+                finalized_words.append(word_info)
+            
+            # Defensive check: ensure no cross-segment timestamp leakage
+            if self.locked_words and finalized_words:
+                last_locked_end = self.locked_words[-1]["end_ms"]
+                first_new_start = finalized_words[0]["start_ms"]
+                if first_new_start < last_locked_end:
+                    print(f"⚠️ Warning: Cross-segment overlap detected! "
+                          f"Last locked end: {last_locked_end}ms, "
+                          f"New start: {first_new_start}ms")
+            
+            # Extend locked words (append, don't replace)
+            self.locked_words.extend(finalized_words)
+            self.locked_words.sort(key=lambda w: w["start_ms"])
+            
+            print(f"📊 Revision {revision} (FINAL)")
+            print(f"   🔒 Locked: {' '.join(w['word'] for w in finalized_words)}")
+            
+        elif is_final and text:
+            # ✅ Final result but no word timestamps - create single entry
+            word_info: WordInfo = {
+                "word": text,
+                "start_ms": buffer_start_ms,
+                "end_ms": buffer_end_ms,
+                "probability": 1.0,
+            }
+            finalized_words = [word_info]
+            self.locked_words.extend(finalized_words)
+            self.locked_words.sort(key=lambda w: w["start_ms"])
+            
+            print(f"📊 Revision {revision} (FINAL, no word timestamps)")
+            print(f"   🔒 Locked: \"{text}\"")
+            
+        else:
+            # ⏳ Interim result - show as unstable preview, don't lock
+            if text:
+                unstable_words = [{
+                    "word": text,
+                    "start_ms": buffer_start_ms,
+                    "end_ms": buffer_end_ms,
+                    "probability": 0.5,
+                }]
+            
+            print(f"📊 Revision {revision} (interim)")
+            print(f"   🌊 Preview: \"{text}\"")
+        
+        # Build output
+        stable_text = " ".join(w["word"] for w in self.locked_words)
+        unstable_text = " ".join(w["word"] for w in unstable_words)
+        
+        print(f"   🔒 Stable:   \"{stable_text}\"")
+        print(f"   🌊 Unstable: \"{unstable_text}\"")
+        
+        return {
+            "segment_id": self.segment_id or segment_id,
+            "finalized_words": finalized_words,
+            "stable_words": list(self.locked_words),
+            "unstable_words": unstable_words,
+            "rendered_text": {
+                "stable": stable_text,
+                "unstable": unstable_text,
+                "full": " ".join(p for p in [stable_text, unstable_text] if p),
+            },
+            "revision": revision,
+            "final": is_final,
+        }
+
+    # ================================================================
+    # INCREMENTAL MODE (Whisper / faster-whisper)
+    # ================================================================
+
+    def _ingest_incremental_mode(
+        self,
+        hypothesis: dict,
+        revision: int,
+        segment_id: str,
+        buffer_start_ms: int,
+        buffer_end_ms: int,
+    ) -> SegmentOutput:
+        """
+        Handle Whisper-style incremental ASR.
+        
+        Words are prefix-stable. Track candidates per region,
+        lock when they exit the buffer.
+        """
+        new_words = hypothesis.get("words", [])
+
         # === STEP 0: No word-level info → fallback rendering only ===
-        # Guard: Only use fallback if we haven't accumulated any words yet
         if not new_words:
-            # If we already have locked words, don't regress - just return current state
             if self.locked_words or self.word_regions:
                 stable_text = " ".join(w["word"] for w in self.locked_words)
                 unstable_words = self._get_best_in_buffer_words()
@@ -188,22 +337,21 @@ class SegmentManager:
 
         return {
             "segment_id": self.segment_id or segment_id,
-
-            # 🔥 AUTHORITATIVE EVENTS
             "finalized_words": newly_locked,
             "stable_words": stable_words,
             "unstable_words": unstable_words,
-
-            # 👁️ VIEW ONLY
             "rendered_text": {
                 "stable": stable_text,
                 "unstable": unstable_text,
                 "full": full_text,
             },
-
             "revision": revision,
             "final": False,
         }
+
+    # ================================================================
+    # FINALIZE
+    # ================================================================
 
     def finalize(self) -> SegmentOutput | None:
         """
@@ -211,7 +359,37 @@ class SegmentManager:
         
         Locks all remaining regions and returns final output.
         """
-        # Lock all remaining regions
+        if self.asr_mode == "rewriting":
+            # Rewriting mode: just return current locked state
+            if not self.locked_words:
+                return None
+
+            stable_text = " ".join(w["word"] for w in self.locked_words)
+            
+            print(f"📊 Finalize (rewriting mode)")
+            print(f"   ✅ Final transcript: \"{stable_text}\"")
+            
+            output: SegmentOutput = {
+                "segment_id": self.segment_id or f"seg-final-{id(self)}",
+                "finalized_words": [],  # Already finalized via is_final
+                "stable_words": list(self.locked_words),
+                "unstable_words": [],
+                "rendered_text": {
+                    "stable": stable_text,
+                    "unstable": "",
+                    "full": stable_text,
+                },
+                "revision": -1,
+                "final": True,
+            }
+            
+            # Reset state
+            self.locked_words = []
+            self.segment_id = None
+            
+            return output
+
+        # Incremental mode: lock all remaining regions
         final_locked: list[WordInfo] = []
         for region in self.word_regions:
             if region["candidates"]:
@@ -238,6 +416,7 @@ class SegmentManager:
         stable_text = " ".join(w["word"] for w in self.locked_words)
         
         # Log final state
+        print(f"📊 Finalize (incremental mode)")
         if final_locked:
             print(f"   🏁 FINALIZED: \"{' '.join(w['word'] for w in final_locked)}\"")
         print(f"   ✅ Final transcript: \"{stable_text}\"")
@@ -263,6 +442,10 @@ class SegmentManager:
         
         return output
 
+    # ================================================================
+    # INCREMENTAL MODE HELPERS
+    # ================================================================
+
     def _filter_valid_words(self, words: list) -> list:
         """Filter out invalid words (zero duration, punctuation only)."""
         valid = []
@@ -270,15 +453,10 @@ class SegmentManager:
             duration = w["end_ms"] - w["start_ms"]
             word_text = w.get("word", "").strip()
             
-            # Skip zero/negative duration
             if duration <= 0:
                 continue
-            
-            # Skip empty words
             if not word_text:
                 continue
-            
-            # Skip single punctuation
             if word_text in ["-", ".", ",", "!", "?", "...", "—"]:
                 continue
                 
@@ -287,22 +465,17 @@ class SegmentManager:
         return valid
 
     def _get_overlap_threshold(self, word: dict) -> float:
-        """
-        Get overlap threshold based on word length.
-        
-        Short words need lower threshold because their
-        timestamps vary more relative to their duration.
-        """
+        """Get overlap threshold based on word length."""
         word_text = word.get("word", "").strip(".,!?\"'")
         word_length = len(word_text)
         
-        if word_length <= 3:       # "Hey", "the", "it", "be"
+        if word_length <= 3:
             return 0.20
-        elif word_length <= 5:     # "When", "part", "ever"
+        elif word_length <= 5:
             return 0.30
-        elif word_length <= 7:     # "Vsauce", "Michael", "truly"
+        elif word_length <= 7:
             return 0.40
-        else:                      # "something", "experienced"
+        else:
             return 0.50
 
     def _add_word_candidate(self, word: dict, revision: int):
@@ -314,7 +487,6 @@ class SegmentManager:
                 break
         
         if matching_region:
-            # Add to existing region
             matching_region["candidates"].append({
                 "word": word["word"],
                 "start_ms": word["start_ms"],
@@ -322,11 +494,9 @@ class SegmentManager:
                 "probability": word.get("probability", 0.5),
                 "revision": revision,
             })
-            # Expand region bounds
             matching_region["start_ms"] = min(matching_region["start_ms"], word["start_ms"])
             matching_region["end_ms"] = max(matching_region["end_ms"], word["end_ms"])
         else:
-            # Create new region
             self.word_regions.append({
                 "start_ms": word["start_ms"],
                 "end_ms": word["end_ms"],
@@ -341,7 +511,6 @@ class SegmentManager:
 
     def _is_same_region(self, word: dict, region: dict) -> bool:
         """Check if word overlaps significantly with region."""
-        # Calculate overlap
         overlap_start = max(word["start_ms"], region["start_ms"])
         overlap_end = min(word["end_ms"], region["end_ms"])
         overlap_duration = max(0, overlap_end - overlap_start)
@@ -349,7 +518,6 @@ class SegmentManager:
         if overlap_duration == 0:
             return False
         
-        # Calculate durations
         word_duration = word["end_ms"] - word["start_ms"]
         region_duration = region["end_ms"] - region["start_ms"]
         shorter_duration = min(word_duration, region_duration)
@@ -357,10 +525,7 @@ class SegmentManager:
         if shorter_duration <= 0:
             return False
         
-        # Get threshold based on word length
         threshold = self._get_overlap_threshold(word)
-        
-        # Check if overlap is significant
         overlap_ratio = overlap_duration / shorter_duration
         return overlap_ratio > threshold
 
@@ -370,9 +535,7 @@ class SegmentManager:
         remaining_regions = []
         
         for region in self.word_regions:
-            # Region has exited if its end is before buffer start (with margin)
             if region["end_ms"] < buffer_start_ms + self.lock_margin_ms:
-                # Select best candidate by probability
                 best = max(region["candidates"], key=lambda c: c["probability"])
                 
                 word_info: WordInfo = {
@@ -385,7 +548,6 @@ class SegmentManager:
                 self.locked_words.append(word_info)
                 newly_locked.append(word_info)
                 
-                # Log selection
                 if len(region["candidates"]) > 1:
                     candidates_str = ", ".join(
                         f"\"{c['word']}\"({c['probability']:.2f})" 
@@ -397,7 +559,6 @@ class SegmentManager:
         
         self.word_regions = remaining_regions
         
-        # Sort locked words by time
         self.locked_words.sort(key=lambda w: w["start_ms"])
         newly_locked.sort(key=lambda w: w["start_ms"])
         
