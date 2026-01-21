@@ -185,6 +185,29 @@ class SegmentManager:
         if not hasattr(self, '_interim_word_history'):
             self._interim_word_history: list[tuple[str, int]] = []  # (word, first_seen_ms)
             self._soft_locked_count = 0
+            self._final_processed = False  # Track if final was already processed
+
+        # If final was already processed, ignore subsequent interims for same segment
+        if not is_final and self._final_processed:
+            # Check if this interim text matches or is subset of locked text
+            current_locked_text = " ".join(w["word"] for w in self.locked_words).strip().lower()
+            interim_text = text.strip().lower()
+            if interim_text and current_locked_text and (interim_text in current_locked_text or current_locked_text in interim_text):
+                print(f"📊 Revision {revision} (interim after final - SKIPPED)")
+                stable_text = " ".join(w["word"] for w in self.locked_words)
+                return {
+                    "segment_id": self.segment_id or segment_id,
+                    "finalized_words": [],
+                    "stable_words": list(self.locked_words),
+                    "unstable_words": [],
+                    "rendered_text": {
+                        "stable": stable_text,
+                        "unstable": "",
+                        "full": stable_text,
+                    },
+                    "revision": revision,
+                    "final": False,
+                }
         
         if is_final and words:
             # ✅ Final result with word timestamps - lock all words
@@ -196,33 +219,49 @@ class SegmentManager:
                     "probability": w.get("probability", 1.0),
                 }
                 finalized_words.append(word_info)
-            
-            # Defensive check: ensure no cross-segment timestamp leakage
-            if self.locked_words and finalized_words:
-                last_locked_end = self.locked_words[-1]["end_ms"]
-                first_new_start = finalized_words[0]["start_ms"]
-                if first_new_start < last_locked_end:
-                    print(f"⚠️ Warning: Cross-segment overlap detected! "
-                          f"Last locked end: {last_locked_end}ms, "
-                          f"New start: {first_new_start}ms")
-                    # SKIP these words - they're duplicates!
-                    print(f"   ⏭️ Skipping {len(finalized_words)} duplicate words")
-                    finalized_words = []
-            
-            if finalized_words:
-                # On final, we need to replace soft-locked words with real timestamps
-                # Remove soft-locked words (they have approximate timestamps)
-                if self._soft_locked_count > 0:
-                    self.locked_words = self.locked_words[:-self._soft_locked_count] if self._soft_locked_count <= len(self.locked_words) else []
-                
-                # Add all finalized words
+
+            # Build finalized text for comparison
+            finalized_text = " ".join(w["word"] for w in finalized_words).strip().lower()
+            current_locked_text = " ".join(w["word"] for w in self.locked_words).strip().lower()
+
+            # Check if finalized text matches current locked text (soft-locked duplicates)
+            if finalized_text == current_locked_text and self._soft_locked_count > 0:
+                print(f"📊 Revision {revision} (FINAL - replacing soft-locked with real timestamps)")
+                print(f"   🔄 Replacing {self._soft_locked_count} soft-locked words")
+                # Clear soft-locked and replace with finalized (better timestamps)
+                self.locked_words = []
                 self.locked_words.extend(finalized_words)
                 self.locked_words.sort(key=lambda w: w["start_ms"])
-                
                 # Reset interim tracking
                 self._interim_word_history = []
                 self._soft_locked_count = 0
-                
+                self._final_processed = True  # Mark final as processed
+                print(f"   🔒 Hard-locked: {' '.join(w['word'] for w in finalized_words)}")
+            elif finalized_text and current_locked_text and finalized_text in current_locked_text:
+                # Finalized is a subset of what's already locked - skip to avoid duplication
+                print(f"⚠️ Final text is subset of locked - skipping to avoid duplication")
+                print(f"   Locked: \"{current_locked_text}\"")
+                print(f"   Final:  \"{finalized_text}\"")
+                finalized_words = []
+                # Reset interim tracking anyway
+                self._interim_word_history = []
+                self._soft_locked_count = 0
+                self._final_processed = True  # Mark final as processed
+            elif finalized_words:
+                # Normal case: replace soft-locked with finalized
+                # Remove soft-locked words (they have approximate timestamps)
+                if self._soft_locked_count > 0:
+                    self.locked_words = self.locked_words[:-self._soft_locked_count] if self._soft_locked_count <= len(self.locked_words) else []
+
+                # Add all finalized words
+                self.locked_words.extend(finalized_words)
+                self.locked_words.sort(key=lambda w: w["start_ms"])
+
+                # Reset interim tracking
+                self._interim_word_history = []
+                self._soft_locked_count = 0
+                self._final_processed = True  # Mark final as processed
+
                 print(f"📊 Revision {revision} (FINAL)")
                 print(f"   🔒 Hard-locked: {' '.join(w['word'] for w in finalized_words)}")
             
@@ -231,7 +270,7 @@ class SegmentManager:
             # Remove soft-locked first
             if self._soft_locked_count > 0:
                 self.locked_words = self.locked_words[:-self._soft_locked_count] if self._soft_locked_count <= len(self.locked_words) else []
-            
+
             word_info: WordInfo = {
                 "word": text,
                 "start_ms": buffer_start_ms,
@@ -241,11 +280,12 @@ class SegmentManager:
             finalized_words = [word_info]
             self.locked_words.extend(finalized_words)
             self.locked_words.sort(key=lambda w: w["start_ms"])
-            
+
             # Reset interim tracking
             self._interim_word_history = []
             self._soft_locked_count = 0
-            
+            self._final_processed = True  # Mark final as processed
+
             print(f"📊 Revision {revision} (FINAL, no word timestamps)")
             print(f"   🔒 Locked: \"{text}\"")
             
@@ -477,7 +517,8 @@ class SegmentManager:
             if hasattr(self, '_interim_word_history'):
                 self._interim_word_history = []
                 self._soft_locked_count = 0
-            
+                self._final_processed = False
+
             return output
 
         # Incremental mode: lock all remaining regions
