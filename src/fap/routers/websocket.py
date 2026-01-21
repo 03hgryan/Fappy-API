@@ -41,17 +41,23 @@ async def stream(ws: WebSocket):
         asr_adapter = create_asr_adapter(
             provider="google",
         )
+    elif provider == "openai":
+        asr_adapter = create_asr_adapter(
+            provider="openai",
+        )
     else:
         # Fallback to whisper
         asr_adapter = create_asr_adapter(
             provider="whisper",
             model=shared_model,
         )
-    
+
     print(f"🎙️ Using ASR adapter: {asr_adapter.provider_name}")
-    
+
     # Create SegmentManager with appropriate mode
-    asr_mode = "rewriting" if provider == "google" else "incremental"
+    # - "rewriting" for streaming APIs (Google, OpenAI) that rewrite hypotheses
+    # - "incremental" for Whisper which provides word-level timestamps
+    asr_mode = "rewriting" if provider in ("google", "openai") else "incremental"
     segment_manager = SegmentManager(asr_mode=asr_mode)
     global_accumulator = GlobalAccumulator()
     

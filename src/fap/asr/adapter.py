@@ -385,6 +385,183 @@ class GoogleAdapter(ASRAdapter):
         # as that would cause duplication if it was already processed)
         return None
 
+class OpenAIAdapter(ASRAdapter):
+    """
+    Adapter for OpenAI Realtime transcription API.
+
+    Uses gpt-4o-transcribe model with streaming WebSocket connection.
+    No word-level timestamps, so uses "rewriting" mode with time-based stability.
+
+    Key insight: Engine's feed() returns one result and puts audio in queue.
+    We need to also drain any additional results that accumulated.
+    Final results should be returned before interims.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "gpt-4o-transcribe",
+        language: str = "en",
+    ):
+        from .openai_engine import OpenAIRealtimeASR
+        import queue as queue_module
+        self._queue_module = queue_module
+
+        self._engine = OpenAIRealtimeASR(
+            api_key=api_key,
+            model=model,
+            language=language,
+        )
+        self._is_streaming = False
+        self._last_hypothesis: dict | None = None
+        self._revision = 0
+
+        # Queue final results that need to be returned
+        self._pending_finals: list[dict] = []
+
+    @property
+    def provider_name(self) -> str:
+        return "openai"
+
+    @property
+    def is_streaming(self) -> bool:
+        return self._is_streaming
+
+    def feed(self, audio: bytes) -> dict | None:
+        """
+        Feed audio to OpenAI and return normalized hypothesis.
+
+        Strategy (same as GoogleAdapter):
+        1. Return pending finals first (from previous call)
+        2. Check engine's finals_queue for any finals we might have missed
+        3. Feed audio to engine
+        4. Check finals_queue again
+        5. Drain regular response queue for latest interim
+        6. Return: pending final > latest interim > None
+        """
+        self._is_streaming = True
+
+        # Step 1: Return pending finals from previous call
+        if self._pending_finals:
+            result = self._pending_finals.pop(0)
+            self._last_hypothesis = result
+            return result
+
+        # Step 2: Check for finals that arrived since last call
+        self._drain_finals_queue()
+        if self._pending_finals:
+            result = self._pending_finals.pop(0)
+            self._last_hypothesis = result
+            return result
+
+        # Step 3: Feed audio to engine
+        self._engine.feed(audio)
+
+        # Step 4: Brief check for finals (no blocking sleep for lower latency)
+        self._drain_finals_queue()
+        if self._pending_finals:
+            result = self._pending_finals.pop(0)
+            self._last_hypothesis = result
+            return result
+
+        # Step 5: No finals - get latest interim from response queue
+        latest_interim = None
+        while True:
+            try:
+                result = self._engine._response_queue.get_nowait()
+                if result and not result.get("is_final_from_openai", False):
+                    latest_interim = result
+                # Skip finals in response queue (already in finals_queue)
+            except self._queue_module.Empty:
+                break
+
+        # Step 6: Return latest interim
+        if latest_interim:
+            self._revision += 1
+            result = self._normalize_hypothesis(latest_interim, is_final=False)
+            self._last_hypothesis = result
+            return result
+
+        return None
+
+    def _drain_finals_queue(self):
+        """Drain all finals from engine's finals queue into pending_finals."""
+        while True:
+            try:
+                final = self._engine._finals_queue.get_nowait()
+                if final:
+                    self._revision += 1
+                    normalized = self._normalize_hypothesis(final, is_final=True)
+                    self._pending_finals.append(normalized)
+                    print(f"   📬 Captured OpenAI final: \"{final.get('text', '')[:50]}...\"")
+            except self._queue_module.Empty:
+                break
+
+    def _normalize_hypothesis(self, hypothesis: dict, is_final: bool) -> dict:
+        """Normalize hypothesis to standard format."""
+        import time
+        return {
+            "type": "hypothesis",
+            "segment_id": hypothesis.get("segment_id", f"openai-{int(time.time() * 1000)}"),
+            "revision": self._revision,
+            "text": hypothesis.get("text", ""),
+            "words": hypothesis.get("words", []),
+            "confidence": hypothesis.get("confidence", 0.9),
+            "start_time_ms": hypothesis.get("start_time_ms", 0),
+            "end_time_ms": hypothesis.get("end_time_ms", 0),
+            "is_final": is_final,
+        }
+
+    def reset(self) -> None:
+        """Reset OpenAI engine state and stop streaming."""
+        self._stop_streaming()
+        self._engine.reset()
+        self._is_streaming = False
+        self._last_hypothesis = None
+        self._revision = 0
+        self._pending_finals = []
+
+    def _stop_streaming(self) -> None:
+        """Stop the OpenAI streaming thread gracefully."""
+        try:
+            # Signal the engine to stop
+            self._engine._is_streaming = False
+            # Send poison pill to unblock the audio generator
+            self._engine._audio_queue.put(None)
+        except:
+            pass
+
+    def finalize(self) -> dict | None:
+        """
+        Finalize current segment and stop streaming.
+
+        Important: We may have already processed all finals during feed().
+        Only return a final here if there's a pending one we haven't returned yet.
+        """
+        import time as time_module
+
+        self._is_streaming = False
+
+        # Check if we already have pending finals
+        if self._pending_finals:
+            self._stop_streaming()
+            return self._pending_finals.pop(0)
+
+        # Brief wait to see if a final arrives
+        deadline = time_module.time() + 0.3
+        while time_module.time() < deadline:
+            self._drain_finals_queue()
+            if self._pending_finals:
+                self._stop_streaming()
+                return self._pending_finals.pop(0)
+            time_module.sleep(0.05)
+
+        # Stop streaming before returning
+        self._stop_streaming()
+
+        # No new finals - return None
+        return None
+
 
 def create_asr_adapter(
     provider: str = "whisper",
@@ -436,9 +613,19 @@ def create_asr_adapter(
         }
         google_defaults.update(kwargs)
         return GoogleAdapter(**google_defaults)
-    
+
+    elif provider == "openai":
+        # Default kwargs for openai
+        openai_defaults = {
+            "api_key": os.getenv("OPENAI_API_KEY"),
+            "model": os.getenv("OPENAI_ASR_MODEL", "gpt-4o-transcribe"),
+            "language": os.getenv("OPENAI_ASR_LANGUAGE", "en"),
+        }
+        openai_defaults.update(kwargs)
+        return OpenAIAdapter(**openai_defaults)
+
     else:
         raise ValueError(
             f"Unknown ASR provider: {provider}. "
-            f"Supported providers: whisper, google"
+            f"Supported providers: whisper, google, openai"
         )

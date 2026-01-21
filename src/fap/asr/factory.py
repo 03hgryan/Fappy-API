@@ -75,20 +75,33 @@ def create_asr_engine(
 
     elif provider == "google":
         from .google_engine import GoogleCloudASR
-        
+
         # Default kwargs for google
         google_defaults = {
             "language_code": os.getenv("GOOGLE_ASR_LANGUAGE", "en-US"),
             "credentials_path": os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
         }
         google_defaults.update(kwargs)
-        
+
         return GoogleCloudASR(**google_defaults)
+
+    elif provider == "openai":
+        from .openai_engine import OpenAIRealtimeASR
+
+        # Default kwargs for openai
+        openai_defaults = {
+            "api_key": os.getenv("OPENAI_API_KEY"),
+            "model": os.getenv("OPENAI_ASR_MODEL", "gpt-4o-transcribe"),
+            "language": os.getenv("OPENAI_ASR_LANGUAGE", "en"),
+        }
+        openai_defaults.update(kwargs)
+
+        return OpenAIRealtimeASR(**openai_defaults)
 
     else:
         raise ValueError(
             f"Unknown ASR provider: {provider}. "
-            f"Supported providers: whisper, google"
+            f"Supported providers: whisper, google, openai"
         )
 
 
@@ -168,6 +181,11 @@ def load_shared_model(provider: str = "whisper", **kwargs: Any) -> Any:
         # Google Cloud doesn't need a pre-loaded model
         print("✅ Google Cloud ASR (no pre-loading needed)")
         return None
-        
+
+    elif provider == "openai":
+        # OpenAI Realtime doesn't need a pre-loaded model
+        print("✅ OpenAI Realtime ASR (no pre-loading needed)")
+        return None
+
     else:
         raise ValueError(f"Unknown provider: {provider}")
