@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 
 from fap import models
 from fap.database import engine
-from fap.routers import users, websocket
+from fap.routers import users
+from fap.routers.websocket import router as websocket_router
 
 load_dotenv()
 
@@ -110,6 +111,12 @@ async def root():
         "docs": "/docs",
         "endpoints": {
             "users": "/api/users",
+            "websocket": {
+                "whisper": "/ws/whisper",
+                "google": "/ws/google",
+                "openai": "/ws/openai",
+                "stream": "/ws/stream (deprecated)",
+            },
         },
     }
 
@@ -123,7 +130,7 @@ app.include_router(
 )
 
 app.include_router(
-    websocket.router,
+    websocket_router,
     prefix="/ws",
     tags=["websocket"],
 )
