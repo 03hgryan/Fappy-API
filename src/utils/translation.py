@@ -25,9 +25,12 @@ class TranslationWorker:
         self.last_translated_sentence = ""
         self.pending_sentences = {}  # {sentence@pos: {count, start_pos}}
         
+        # Context tracking
+        self.confirmed_sentences = []  # Store confirmed sentences for context
+        
         # Single active translation
         self.active_task = None
-        self.last_translated_text = ""  # Track what we last translated
+        self.last_translated_text = ""
         
         print(f"🔧 TranslationWorker initialized (confirmation_cycles={confirmation_cycles})")
     
@@ -136,6 +139,9 @@ class TranslationWorker:
                     self.last_translated_sentence = sentence
                     del self.pending_sentences[key]
                     
+                    # Add to confirmed sentences for context
+                    self.confirmed_sentences.append(sentence)
+                    
                     short = sentence[:40] + "..." if len(sentence) > 40 else sentence
                     print(f"✅ Confirmed: \"{short}\" (cut-off: {sentence_end})")
                     
@@ -185,12 +191,16 @@ class TranslationWorker:
         )
     
     async def _do_translate(self, text: str):
-        """Perform translation."""
+        """Perform translation with context."""
         try:
+            # Get last 3 confirmed sentences as context
+            context_sentences = self.confirmed_sentences[-3:] if self.confirmed_sentences else []
+            
             await translate_and_send(
                 self.ws,
                 text,
-                is_partial=True
+                is_partial=True,
+                context=context_sentences
             )
         except WebSocketDisconnect:
             print("❌ WebSocket disconnected")
@@ -228,6 +238,7 @@ async def translate_and_send(
     ws: WebSocket,
     text: str,
     is_partial: bool = False,
+    context: list = None,
     source_lang: str = "English",
     target_lang: str = "Korean",
     model: str = "gpt-5.2"
@@ -238,10 +249,22 @@ async def translate_and_send(
     
     client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
     
+    # Build system prompt with context
+    if context:
+        context_text = " ".join(context)
+        system_prompt = f"""Translate {source_lang} to {target_lang}. Output only the translation.
+
+For context, here are the previous sentences (already translated, do not include in output):
+{context_text}
+
+Maintain consistent tone and style with the context above."""
+    else:
+        system_prompt = f"Translate {source_lang} to {target_lang}. Output only the translation."
+    
     stream = await client.responses.create(
         model=model,
         input=[
-            {"role": "system", "content": f"Translate {source_lang} to {target_lang}. Output only the translation."},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": text}
         ],
         stream=True
