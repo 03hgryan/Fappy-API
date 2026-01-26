@@ -53,6 +53,7 @@ async def stream(ws: WebSocket):
         print("-"*60)
 
         await ws.send_json({"type": "session_started", "data": session_data})
+        print(f"📤 → Frontend: session_started")
 
         # Run audio forwarding and transcript processing
         await asyncio.gather(
@@ -138,18 +139,21 @@ async def forward_transcripts(client_ws: WebSocket, elevenlabs_ws, translator: T
 
             # Log transcripts (only when text changes to reduce noise)
             if msg_type == "partial_transcript":
-                if text != last_partial_text:
-                    # Show last 60 chars to see what's new
-                    display = text if len(text) <= 60 else "..." + text[-57:]
-                    print(f"📝 {display}")
-                    last_partial_text = text
+                # if text != last_partial_text:
+                #     # Show last 60 chars to see what's new
+                #     display = text if len(text) <= 60 else "..." + text[-57:]
+                #     print(f"📝 {display}")
+                #     last_partial_text = text
+                print(f"📝 {text}")
                     
             elif msg_type == "committed_transcript":
-                display = text if len(text) <= 60 else text[:57] + "..."
-                print(f"✅ FINAL: {display}")
+                # display = text if len(text) <= 60 else text[:57] + "..."
+                # print(f"✅ FINAL: {display}")
+                print(f"✅ FINAL: {text}")
 
             # Forward to client
             await client_ws.send_json({"type": msg_type, "data": data})
+            print(f"📤 → Frontend: {msg_type}")
 
             # Process for translation
             if text and msg_type in ["partial_transcript", "committed_transcript"]:
@@ -157,7 +161,8 @@ async def forward_transcripts(client_ws: WebSocket, elevenlabs_ws, translator: T
                 await translator.process_transcript(text, is_committed)
             
             if msg_type == "committed_transcript":
-                break
+                print(f"✅ COMMITTED: {text}")
+                # break
 
     except websockets.ConnectionClosed:
         pass

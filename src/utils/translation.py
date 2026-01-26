@@ -1,301 +1,413 @@
 """
-Translation service using OpenAI's Responses API.
-Translates only NEW content incrementally.
+Sentence-by-sentence Translation Worker with Position Tracking.
+
+Key insight: 
+- Split transcript into sentences
+- Track each sentence by its START POSITION in full transcript
+- Same position = same sentence (even if text changed due to ASR revision)
+- Different position = different sentence
+
+Option 2: Show speculative translation immediately, confirm when stable
+- Pending sentences (count < threshold): shown in yellow, may change
+- Confirmed sentences (count >= threshold): shown in green, locked
+
+Punctuation: If transcript lacks punctuation, call LLM to add it (debounced 500ms)
+
+Output: 
+{ 
+    type: "sentences", 
+    confirmed: [{source, translation}, ...],   # stable, won't change
+    pending: [{source, translation}, ...],     # may still change
+    remainder: {source, translation}           # incomplete sentence
+}
 """
 
 import os
 import asyncio
-import re
-from fastapi import WebSocket, WebSocketDisconnect
+import time
+from fastapi import WebSocket
 import openai
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
-class TranslationWorker:
-    """Manages incremental translation with rolling cut-off"""
+def split_sentences(text: str) -> tuple[list[str], str]:
+    """
+    Split text into complete sentences and incomplete remainder.
+    Returns: (complete_sentences, incomplete_remainder)
+    """
+    if not text.strip():
+        return [], ""
     
-    def __init__(self, ws: WebSocket, confirmation_cycles: int = 5):
+    sentences = []
+    current = ""
+    text = text.strip()
+    
+    i = 0
+    while i < len(text):
+        current += text[i]
+        
+        if text[i] in '.!?':
+            is_end = (i == len(text) - 1) or (i + 1 < len(text) and text[i + 1] == ' ')
+            if is_end:
+                sentences.append(current.strip())
+                current = ""
+                if i + 1 < len(text) and text[i + 1] == ' ':
+                    i += 1
+        
+        i += 1
+    
+    return sentences, current.strip()
+
+
+class TranslationWorker:
+    """
+    Position-based sentence tracking with immediate speculative display.
+    """
+    
+    def __init__(
+        self,
+        ws: WebSocket,
+        source_lang: str = "English",
+        target_lang: str = "Korean",
+        model: str = "gpt-4.1",
+        stability_threshold: int = 3,
+        punctuation_debounce: float = 0.5  # 500ms
+    ):
         self.ws = ws
-        self.confirmation_cycles = confirmation_cycles
+        self.source_lang = source_lang
+        self.target_lang = target_lang
+        self.model = model
+        self.stability_threshold = stability_threshold
+        self.punctuation_debounce = punctuation_debounce
+        
+        # Position-based tracking: {position: {sentence, translation, count}}
+        self.tracked = {}
+        
+        # Confirmed sentences (stable): [{source, translation, position}, ...]
+        self.confirmed = []
+        
+        # Active translation tasks: {position: task}
+        self.translation_tasks = {}
+        
+        # Remainder translation task
+        self.remainder_task: asyncio.Task | None = None
+        
+        # Live translation (Track 2)
+        self.live_task: asyncio.Task | None = None
+        self.live_source = ""
+        self.live_translation = ""
+        
+        # Punctuation debounce
+        self.last_transcript = ""
+        self.last_punctuated = ""
+        self.punctuation_task: asyncio.Task | None = None
+        self.last_process_time = 0
+        
+        # Shutdown
         self.shutdown_event = asyncio.Event()
         
-        # Cut-off tracking
-        self.translated_up_to = 0
-        self.last_translated_sentence = ""
-        self.pending_sentences = {}  # {sentence@pos: {count, start_pos}}
-        
-        # Context tracking
-        self.confirmed_sentences = []  # Store confirmed sentences for context
-        
-        # Single active translation
-        self.active_task = None
-        self.last_translated_text = ""
-        
-        print(f"🔧 TranslationWorker initialized (confirmation_cycles={confirmation_cycles})")
+        print(f"🔧 TranslationWorker initialized ({source_lang} → {target_lang}, threshold={stability_threshold})")
     
     def start(self):
         print("▶️  TranslationWorker started")
         return None
     
-    def _find_remaining_start(self, text: str) -> int:
-        """Find where to start processing based on last confirmed sentence."""
+    async def process_transcript(self, transcript: str, is_committed: bool = False):
+        """Process transcript - two tracks: sentences + live."""
+        if not transcript.strip():
+            return
         
-        if not self.last_translated_sentence:
-            return 0
+        self.last_transcript = transcript
+        current_time = asyncio.get_event_loop().time()
         
-        sentence = self.last_translated_sentence
+        # Track 1: Sentence processing (debounced punctuation)
+        if self.punctuation_task is None or self.punctuation_task.done():
+            if current_time - self.last_process_time >= self.punctuation_debounce:
+                self.last_process_time = current_time
+                self.punctuation_task = asyncio.create_task(
+                    self._process_sentences(transcript, is_committed)
+                )
         
-        # Find all occurrences
-        positions = []
-        start = 0
-        while True:
-            pos = text.find(sentence, start)
-            if pos == -1:
-                break
-            positions.append(pos)
-            start = pos + 1
-        
-        if not positions:
-            print(f"⚠️  Last sentence not found, using position {self.translated_up_to}")
-            return min(self.translated_up_to, len(text))
-        
-        if len(positions) == 1:
-            return positions[0] + len(sentence)
-        
-        closest = min(positions, key=lambda p: abs(p - self.translated_up_to))
-        return closest + len(sentence)
+        # Track 2: Live translation (always translate full text after confirmed)
+        await self._update_live(transcript)
     
-    async def process_transcript(self, text: str, is_committed: bool = False):
-        """Process incoming transcript."""
-        
-        # 1. Get remaining text after cut-off
-        remaining_start = self._find_remaining_start(text)
-        remaining_text = text[remaining_start:].strip()
-        
-        if not remaining_text:
-            return
-        
-        # 2. Update pending sentences for cut-off tracking
-        await self._update_pending(text, remaining_start, is_committed)
-        
-        # 3. Recalculate remaining after potential cut-off move
-        remaining_start = self._find_remaining_start(text)
-        remaining_text = text[remaining_start:].strip()
-        
-        if not remaining_text:
-            return
-        
-        # 4. Translate if different from last and no active translation
-        if remaining_text != self.last_translated_text:
-            await self._translate_remaining(remaining_text)
-    
-    async def _update_pending(self, text: str, remaining_start: int, is_committed: bool):
-        """Track sentences for confirmation (cut-off point)."""
-        
-        remaining_text = text[remaining_start:].strip()
-        if not remaining_text:
-            return
-        
-        sentences = self._split_sentences(remaining_text)
-        if not sentences:
-            return
-        
-        # Determine completed sentences
-        if remaining_text.rstrip().endswith(('.', '!', '?')):
-            completed_sentences = sentences
-        else:
-            completed_sentences = sentences[:-1] if len(sentences) > 1 else []
-        
-        # Build (sentence, position) pairs
-        current_pos = remaining_start
-        completed_with_positions = []
-        
-        for sentence in sentences:
-            pos = text.find(sentence, current_pos)
-            if pos != -1:
-                if sentence in completed_sentences:
-                    completed_with_positions.append((sentence, pos))
-                current_pos = pos + len(sentence)
-        
-        # Update counts
-        current_pending_keys = set()
-        
-        for sentence, start_pos in completed_with_positions:
-            key = f"{sentence}@{start_pos}"
-            current_pending_keys.add(key)
+    async def _process_sentences(self, transcript: str, is_committed: bool):
+        """Track 1: Punctuate and process for confirmed sentences."""
+        try:
+            punctuated = await self._add_punctuation(transcript)
+            self.last_punctuated = punctuated
             
-            if key in self.pending_sentences:
-                count = self.pending_sentences[key]["count"]
-                if count < self.confirmation_cycles - 1:
-                    self.pending_sentences[key]["count"] += 1
-                    new_count = self.pending_sentences[key]["count"]
-                    short = sentence[:30] + "..." if len(sentence) > 30 else sentence
-                    print(f"⏳ [{new_count}/{self.confirmation_cycles}] \"{short}\"")
-                else:
-                    # Confirmed! Move cut-off
-                    sentence_end = start_pos + len(sentence)
-                    self.translated_up_to = sentence_end
-                    self.last_translated_sentence = sentence
-                    del self.pending_sentences[key]
-                    
-                    # Add to confirmed sentences for context
-                    self.confirmed_sentences.append(sentence)
-                    
-                    short = sentence[:40] + "..." if len(sentence) > 40 else sentence
-                    print(f"✅ Confirmed: \"{short}\" (cut-off: {sentence_end})")
-                    
-                    # Clear pending before this position
-                    for k in list(self.pending_sentences.keys()):
-                        if self.pending_sentences[k]["start_pos"] < sentence_end:
-                            del self.pending_sentences[k]
-                    
-                    # Reset last translated to force new translation
-                    self.last_translated_text = ""
-            else:
-                self.pending_sentences[key] = {
-                    "count": 1,
-                    "start_pos": start_pos
-                }
-                short = sentence[:30] + "..." if len(sentence) > 30 else sentence
-                print(f"🆕 [1/{self.confirmation_cycles}] \"{short}\"")
-        
-        # Clean up disappeared
-        disappeared = []
-        for key in list(self.pending_sentences.keys()):
-            if key not in current_pending_keys:
-                sentence = key.rsplit("@", 1)[0]
-                disappeared.append(sentence[:20])
-                del self.pending_sentences[key]
-        
-        if disappeared:
-            print(f"🗑️  Removed {len(disappeared)} disappeared")
-        
-        if is_committed:
-            print(f"📨 Committed transcript received")
-            self.pending_sentences.clear()
+            print(f"📝 Punctuated: \"{punctuated[:80]}...\"" if len(punctuated) > 80 else f"📝 Punctuated: \"{punctuated}\"")
+            
+            await self._process_punctuated(punctuated, is_committed)
+            
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"❌ Process error: {e}")
     
-    async def _translate_remaining(self, text: str):
-        """Translate remaining text. Skip if previous still running."""
+    async def _update_live(self, transcript: str):
+        """Track 2: Translate everything after confirmed sentences."""
+        # Find where confirmed text ends
+        confirmed_end = 0
+        if self.confirmed:
+            last_confirmed = self.confirmed[-1]
+            # Find end position of last confirmed sentence in transcript
+            pos = transcript.lower().find(last_confirmed["source"].lower()[:30])
+            if pos != -1:
+                confirmed_end = pos + len(last_confirmed["source"])
         
-        # If previous translation still running, skip this cycle
-        if self.active_task and not self.active_task.done():
+        # Get live portion (everything after confirmed)
+        live_source = transcript[confirmed_end:].strip()
+        
+        if not live_source:
             return
         
-        short = text[:50] + "..." if len(text) > 50 else text
-        print(f"🔄 Translating: \"{short}\"")
+        # Throttle: only translate if previous task is done
+        # (don't cancel - let it complete so user sees something)
+        if self.live_task and not self.live_task.done():
+            return  # Previous translation still running, skip this update
         
-        self.last_translated_text = text
-        self.active_task = asyncio.create_task(
-            self._do_translate(text)
+        # Start new live translation
+        print(f"🔴 Live: \"{live_source[:50]}...\"" if len(live_source) > 50 else f"🔴 Live: \"{live_source}\"")
+        self.live_task = asyncio.create_task(
+            self._translate_live(live_source)
         )
     
-    async def _do_translate(self, text: str):
-        """Perform translation with context."""
+    async def _translate_live(self, text: str):
+        """Translate live portion."""
         try:
-            # Get last 3 confirmed sentences as context
-            context_sentences = self.confirmed_sentences[-3:] if self.confirmed_sentences else []
-            
-            await translate_and_send(
-                self.ws,
-                text,
-                is_partial=True,
-                context=context_sentences
-            )
-        except WebSocketDisconnect:
-            print("❌ WebSocket disconnected")
+            translation = await self._translate(text)
+            self.live_translation = translation
+            await self._send_state()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            print(f"❌ Translation error: {type(e).__name__}: {e}")
+            print(f"❌ Live translation error: {e}")
+    
+    async def _add_punctuation(self, text: str) -> str:
+        """Call LLM to add punctuation."""
+        if not OPENAI_API_KEY:
+            return text
+        
+        client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+        
+        try:
+            response = await client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Add sentence-ending punctuation (periods, question marks, exclamation points) to transcripts. Keep all words exactly the same. Output only the punctuated text."
+                    },
+                    {
+                        "role": "user",
+                        "content": "yeah I don't know what to do about it honestly like I was thinking maybe we could go but then again it's kind of far and I'm not sure if it's worth it what do you think"
+                    },
+                    {
+                        "role": "assistant", 
+                        "content": "Yeah, I don't know what to do about it honestly. Like I was thinking maybe we could go, but then again it's kind of far and I'm not sure if it's worth it. What do you think?"
+                    },
+                    {
+                        "role": "user",
+                        "content": text
+                    }
+                ],
+                temperature=0,
+                max_tokens=2000
+            )
+            result = response.choices[0].message.content.strip()
+            print(f"🔤 Punctuation result: \"{result[:100]}...\"" if len(result) > 100 else f"🔤 Punctuation result: \"{result}\"")
+            return result
+        except Exception as e:
+            print(f"⚠️ Punctuation error: {e}")
+            return text
+    
+    async def _process_punctuated(self, transcript: str, is_committed: bool = False):
+        """Process punctuated transcript using position-based tracking."""
+        
+        # Split into sentences
+        sentences, remainder = split_sentences(transcript)
+        
+        # Find position of each sentence in full transcript
+        current_sentences = []  # [(position, sentence), ...]
+        search_start = 0
+        for sentence in sentences:
+            pos = transcript.find(sentence, search_start)
+            if pos != -1:
+                current_sentences.append((pos, sentence))
+                search_start = pos + len(sentence)
+        
+        # Track and process each sentence
+        current_positions = set()
+        for pos, sentence in current_sentences:
+            current_positions.add(pos)
+            
+            # Already confirmed at this position? Skip
+            if any(c["position"] == pos for c in self.confirmed):
+                continue
+            
+            # Track by position
+            if pos in self.tracked:
+                if self.tracked[pos]["sentence"] == sentence:
+                    # Same position, same text → increment count
+                    self.tracked[pos]["count"] += 1
+                    count = self.tracked[pos]["count"]
+                    short = sentence[:40] + "..." if len(sentence) > 40 else sentence
+                    print(f"⏳ [{count}/{self.stability_threshold}] @{pos}: \"{short}\"")
+                    
+                    # Check if now stable
+                    if count >= self.stability_threshold:
+                        await self._promote_to_confirmed(pos)
+                else:
+                    # Same position, different text → ASR revision
+                    old = self.tracked[pos]["sentence"]
+                    print(f"🔄 Revision @{pos}: \"{old[:30]}\" → \"{sentence[:30]}\"")
+                    
+                    # Cancel old translation if running
+                    if pos in self.translation_tasks:
+                        self.translation_tasks[pos].cancel()
+                        del self.translation_tasks[pos]
+                    
+                    # Reset tracking, start new translation
+                    self.tracked[pos] = {"sentence": sentence, "translation": "", "count": 1}
+                    self._start_translation(pos, sentence)
+            else:
+                # New position → start tracking and translating
+                short = sentence[:40] + "..." if len(sentence) > 40 else sentence
+                print(f"🆕 [1/{self.stability_threshold}] @{pos}: \"{short}\"")
+                self.tracked[pos] = {"sentence": sentence, "translation": "", "count": 1}
+                self._start_translation(pos, sentence)
+        
+        # Clean up disappeared positions
+        disappeared = [p for p in list(self.tracked.keys()) if p not in current_positions]
+        for p in disappeared:
+            old_sentence = self.tracked[p]["sentence"]
+            short = old_sentence[:30] + "..." if len(old_sentence) > 30 else old_sentence
+            print(f"🗑️  Removed @{p}: \"{short}\"")
+            
+            # Cancel translation if running
+            if p in self.translation_tasks:
+                self.translation_tasks[p].cancel()
+                del self.translation_tasks[p]
+            
+            del self.tracked[p]
+        
+        # Remove old remainder handling - live translation handles this now
+        await self._send_state()
+    
+    def _start_translation(self, pos: int, sentence: str):
+        """Start translating a sentence in background."""
+        async def translate():
+            try:
+                translation = await self._translate(sentence)
+                if pos in self.tracked and self.tracked[pos]["sentence"] == sentence:
+                    self.tracked[pos]["translation"] = translation
+                    print(f"✅ Translated @{pos}: \"{sentence[:30]}\" → \"{translation[:30]}\"")
+                    await self._send_state()
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                print(f"❌ Translation error @{pos}: {e}")
+        
+        self.translation_tasks[pos] = asyncio.create_task(translate())
+    
+    async def _promote_to_confirmed(self, pos: int):
+        """Move a tracked sentence to confirmed."""
+        if pos not in self.tracked:
+            return
+        
+        data = self.tracked[pos]
+        sentence = data["sentence"]
+        translation = data["translation"]
+        
+        # If translation not ready yet, wait for it
+        if not translation and pos in self.translation_tasks:
+            try:
+                await self.translation_tasks[pos]
+                translation = self.tracked[pos]["translation"]
+            except:
+                translation = await self._translate(sentence)
+        elif not translation:
+            translation = await self._translate(sentence)
+        
+        print(f"🔒 Confirmed @{pos}: \"{sentence[:40]}\"")
+        
+        self.confirmed.append({
+            "source": sentence,
+            "translation": translation,
+            "position": pos
+        })
+        self.confirmed.sort(key=lambda x: x["position"])
+        
+        # Clean up
+        del self.tracked[pos]
+        if pos in self.translation_tasks:
+            del self.translation_tasks[pos]
+        
+        # Clear live translation since confirmed moved forward
+        self.live_translation = ""
+        await self._send_state()
+    
+    async def _send_state(self):
+        """Send current state to frontend."""
+        # Confirmed translations
+        confirmed_translation = " ".join([c["translation"] for c in self.confirmed])
+        
+        await self.ws.send_json({
+            "type": "translation",
+            "confirmed": confirmed_translation,
+            "live": self.live_translation
+        })
+        
+        c_short = confirmed_translation[-40:] if len(confirmed_translation) > 40 else confirmed_translation
+        l_short = self.live_translation[:40] if len(self.live_translation) > 40 else self.live_translation
+        print(f"📤 Sent: confirmed=\"...{c_short}\" | live=\"{l_short}...\"")
+    
+    async def _translate(self, text: str) -> str:
+        """Translate using OpenAI."""
+        if not OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY not configured")
+        
+        client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+        
+        # Context from confirmed sentences
+        context = ""
+        if self.confirmed:
+            last_few = self.confirmed[-3:]
+            context = "\n".join([f"{s['source']} → {s['translation']}" for s in last_few])
+        
+        system_prompt = f"Translate {self.source_lang} to {self.target_lang}. Output only the translation."
+        if context:
+            system_prompt += f"\n\nPrevious translations for context:\n{context}"
+        
+        response = await client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ],
+            temperature=0.3,
+            max_tokens=2000
+        )
+        
+        return response.choices[0].message.content.strip()
     
     async def shutdown(self):
-        print("🛑 Shutdown requested")
+        print("🛑 Shutting down...")
         self.shutdown_event.set()
         
-        # Wait for active translation to complete
-        if self.active_task and not self.active_task.done():
-            print("⏳ Waiting for active translation...")
-            try:
-                await asyncio.wait_for(self.active_task, timeout=5.0)
-            except asyncio.TimeoutError:
-                print("⚠️  Translation timed out")
+        # Cancel punctuation task
+        if self.punctuation_task and not self.punctuation_task.done():
+            self.punctuation_task.cancel()
+        
+        # Cancel live translation task
+        if self.live_task and not self.live_task.done():
+            self.live_task.cancel()
+        
+        # Cancel all sentence translation tasks
+        for task in self.translation_tasks.values():
+            task.cancel()
         
         print("✅ Shutdown complete")
-    
-    def _split_sentences(self, text: str) -> list:
-        parts = re.split(r'([.!?])\s+', text)
-        sentences = []
-        for i in range(0, len(parts) - 1, 2):
-            if i + 1 < len(parts):
-                sentences.append(parts[i] + parts[i + 1])
-            else:
-                sentences.append(parts[i])
-        if len(parts) % 2 == 1:
-            sentences.append(parts[-1])
-        return [s.strip() for s in sentences if s.strip()]
-
-
-async def translate_and_send(
-    ws: WebSocket,
-    text: str,
-    is_partial: bool = False,
-    context: list = None,
-    source_lang: str = "English",
-    target_lang: str = "Korean",
-    model: str = "gpt-5.2"
-):
-    """Translate text using OpenAI and stream to client."""
-    if not OPENAI_API_KEY:
-        raise ValueError("OPENAI_API_KEY not configured")
-    
-    client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
-    
-    # Build system prompt with context
-    if context:
-        context_text = " ".join(context)
-        system_prompt = f"""Translate {source_lang} to {target_lang}. Output only the translation.
-
-For context, here are the previous sentences (already translated, do not include in output):
-{context_text}
-
-Maintain consistent tone and style with the context above."""
-    else:
-        system_prompt = f"Translate {source_lang} to {target_lang}. Output only the translation."
-    
-    stream = await client.responses.create(
-        model=model,
-        input=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": text}
-        ],
-        stream=True
-    )
-
-    translated = ""
-
-    async for event in stream:
-        if event.type == "response.output_text.delta":
-            translated += event.delta
-            
-            await ws.send_json({
-                "type": "translation_delta",
-                "data": {
-                    "delta": event.delta,
-                    "text": translated,
-                    "is_partial": is_partial,
-                    "source_text": text
-                }
-            })
-
-        elif event.type in ["response.done", "response.completed"]:
-            src = text[:30] + "..." if len(text) > 30 else text
-            print(f"  ✓ [{src}] → [{translated}]")
-            
-            await ws.send_json({
-                "type": "translation_complete",
-                "data": {
-                    "text": translated,
-                    "is_partial": is_partial,
-                    "source_text": text
-                }
-            })
-            break
