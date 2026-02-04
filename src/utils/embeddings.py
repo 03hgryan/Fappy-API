@@ -113,18 +113,26 @@ def find_source_boundary(
     if not words:
         return "", source_text, 0.0
     
-    # Encode previous translation once
-    prev_emb = model.encode([previous_translation])
+    # Generate all prefixes
+    prefixes = [" ".join(words[:i]) for i in range(1, len(words) + 1)]
     
-    # Calculate similarity for all prefixes
+    # Batch encode: all prefixes + previous translation in ONE call
+    all_texts = prefixes + [previous_translation]
+    all_embeddings = model.encode(all_texts)
+    
+    # Split embeddings
+    prefix_embeddings = all_embeddings[:-1]  # All but last
+    prev_emb = all_embeddings[-1:]            # Last one (keep 2D shape)
+    
+    # Calculate all similarities at once
+    similarities = cosine_similarity(prefix_embeddings, prev_emb).flatten()
+    
+    # Build scores list
     if debug:
         print(f"\n      📊 Prefix similarities:")
     scores = []
-    for i in range(1, len(words) + 1):
-        prefix = " ".join(words[:i])
-        prefix_emb = model.encode([prefix])
-        score = float(cosine_similarity(prefix_emb, prev_emb)[0][0])
-        scores.append((i, prefix, score))
+    for i, (prefix, score) in enumerate(zip(prefixes, similarities), start=1):
+        scores.append((i, prefix, float(score)))
         if debug:
             print(f"         [{i:2d}] {score:.3f} | \"{prefix}\"")
     
