@@ -1,17 +1,28 @@
 from dotenv import load_dotenv
-load_dotenv()  # Load .env file before other imports
+load_dotenv()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 import os
 
 from src.routers import websocket
 from src.routers import stt
+from src.utils.embeddings import load_model
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Preload LaBSE at startup
+    load_model()
+    yield
+
 
 app = FastAPI(
     title="ELE - WebSocket Server",
     description="FastAPI WebSocket Server",
     version="1.0.0",
+    lifespan=lifespan,  # Include lifespan here
 )
 
 # CORS configuration
@@ -23,7 +34,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # Root endpoint
 @app.get("/")

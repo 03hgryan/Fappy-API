@@ -135,12 +135,14 @@ class StreamingTranslationWorker:
         target_lang: str = "Korean",
         model: str = "gpt-4o-mini",
         similarity_threshold: float = 0.85,
+        debug: bool = False,  # Set to True for verbose logging
     ):
         self.ws = ws
         self.source_lang = source_lang
         self.target_lang = target_lang
         self.model = model
         self.similarity_threshold = similarity_threshold
+        self.debug = debug
         
         # Translation history
         self.previous_full_translation = ""
@@ -166,15 +168,11 @@ class StreamingTranslationWorker:
         # Shutdown
         self.shutdown_event = asyncio.Event()
         
-        print("="*80)
-        print("🧪 StreamingTranslationWorker initialized (FUZZY MATCHING + EMBEDDINGS)")
-        print(f"   {source_lang} → {target_lang}")
-        print(f"   Model: {model}")
-        print(f"   Similarity threshold: {similarity_threshold}")
-        print("="*80)
+        print(f"🧪 StreamingTranslationWorker initialized ({source_lang} → {target_lang}, debug={debug})")
     
     def start(self):
-        print("▶️  Worker ready - fuzzy matching + embeddings mode")
+        if self.debug:
+            print("▶️  Worker ready - fuzzy matching + embeddings mode")
         return None
     
     async def process_transcript(self, transcript: str, is_committed: bool = False):
@@ -185,10 +183,11 @@ class StreamingTranslationWorker:
         self.asr_update_count += 1
         self.current_transcript = transcript  # Track current English transcript
         
-        print("\n" + "─"*80)
-        print(f"📥 ASR UPDATE #{self.asr_update_count} ({'COMMITTED' if is_committed else 'partial'})")
-        print(f"   Full transcript: \"{transcript}\"")
-        print("─"*80)
+        if self.debug:
+            print("\n" + "─"*80)
+            print(f"📥 ASR UPDATE #{self.asr_update_count} ({'COMMITTED' if is_committed else 'partial'})")
+            print(f"   Full transcript: \"{transcript}\"")
+            print("─"*80)
         
         # If we have confirmed Korean, find what English is already translated
         text_to_translate = transcript
@@ -199,45 +198,45 @@ class StreamingTranslationWorker:
                 self.confirmed_korean,
                 threshold=0.50,
                 tolerance=0.05,
+                debug=self.debug,
             )
             
             self.matched_english = matched
             self.remaining_english = remaining
             
-            print(f"\n   ✂️  CUTTING TRANSCRIPT:")
-            print(f"      Confirmed Korean: \"{self.confirmed_korean[:50]}{'...' if len(self.confirmed_korean) > 50 else ''}\"")
-            print(f"      Matched English: \"{matched}\"")
-            print(f"      Remaining to translate: \"{remaining}\"")
+            if self.debug:
+                print(f"\n   ✂️  CUTTING TRANSCRIPT:")
+                print(f"      Confirmed Korean: \"{self.confirmed_korean[:50]}{'...' if len(self.confirmed_korean) > 50 else ''}\"")
+                print(f"      Matched English: \"{matched}\"")
+                print(f"      Remaining to translate: \"{remaining}\"")
             
             # Only translate the remaining part
             if remaining.strip():
                 text_to_translate = remaining
             else:
-                print(f"      → Nothing new to translate!")
+                if self.debug:
+                    print(f"      → Nothing new to translate!")
                 return
         
         # Save previous translation
         self.previous_full_translation = self.current_full_translation
         
         # Stream translate only the NEW part
-        print(f"\n   📤 TRANSLATING: \"{text_to_translate}\"")
+        if self.debug:
+            print(f"\n   📤 TRANSLATING: \"{text_to_translate}\"")
         await self._stream_translate_full(text_to_translate)
         
-        # TODO: COMBINED logic
-        # 
-        # After stream completes:
-        #   current_full_translation = confirmed_korean + accumulated
-        #   But need to avoid duplicates if we confirmed during stream
-        #
-        # For now, just show what we have:
-        if self.confirmed_korean and text_to_translate != transcript:
-            print(f"\n   🔗 [TODO] COMBINED:")
-            print(f"      confirmed_korean: \"{self.confirmed_korean}\"")
-            print(f"      accumulated: \"{self.accumulated}\"")
-            print(f"      Need to combine without duplicates")
-        
-        # Analyze with fuzzy matching
-        self._analyze_with_fuzzy_matching()
+        # Skip fuzzy matching analysis in production (it's just for logging)
+        if self.debug:
+            # TODO: COMBINED logic
+            if self.confirmed_korean and text_to_translate != transcript:
+                print(f"\n   🔗 [TODO] COMBINED:")
+                print(f"      confirmed_korean: \"{self.confirmed_korean}\"")
+                print(f"      accumulated: \"{self.accumulated}\"")
+                print(f"      Need to combine without duplicates")
+            
+            # Analyze with fuzzy matching (debug only)
+            self._analyze_with_fuzzy_matching()
         
         # Send to frontend
         await self._send_state()
@@ -254,8 +253,9 @@ class StreamingTranslationWorker:
         self.stream_chunks = []
         self.accumulated = ""
         
-        print(f"\n🔄 Starting GPT stream...")
-        print("   Streaming chunks:")
+        if self.debug:
+            print(f"\n🔄 Starting GPT stream...")
+            print("   Streaming chunks:")
         
         try:
             stream = await client.chat.completions.create(
@@ -292,40 +292,45 @@ Important:
                     # Count punctuation in accumulated
                     punct_count = self._count_punctuation(self.accumulated)
                     
-                    # Log this chunk
-                    print(f"   [{chunk_num:3d}] +\"{content}\" → punct={punct_count}")
+                    # Log this chunk (debug only)
+                    if self.debug:
+                        print(f"   [{chunk_num:3d}] +\"{content}\" → punct={punct_count}")
                     
                     # Send live update to frontend
                     await self._send_state()
                     
                     # Check if new sentence completed (just log, don't confirm yet)
                     if punct_count > prev_punct_count:
-                        new_sentence = extract_sentence_at_index(self.accumulated, punct_count)
-                        print(f"\n   🔔 NEW SENTENCE #{punct_count}: \"{new_sentence}\"")
+                        if self.debug:
+                            new_sentence = extract_sentence_at_index(self.accumulated, punct_count)
+                            print(f"\n   🔔 NEW SENTENCE #{punct_count}: \"{new_sentence}\"")
                         prev_punct_count = punct_count
             
             # Final result
             self.current_full_translation = self.accumulated
             final_punct_count = self._count_punctuation(self.current_full_translation)
             
-            print(f"\n✅ Stream complete:")
-            print(f"   Total chunks: {chunk_num}")
-            print(f"   Final translation: \"{self.current_full_translation}\"")
-            print(f"   Final punctuation count: {final_punct_count}")
+            if self.debug:
+                print(f"\n✅ Stream complete:")
+                print(f"   Total chunks: {chunk_num}")
+                print(f"   Final translation: \"{self.current_full_translation}\"")
+                print(f"   Final punctuation count: {final_punct_count}")
             
             # === CONFIRMATION LOGIC (2 consecutive cycles) ===
             if final_punct_count > 0:
                 # This stream has punctuation
                 if self.pending:
                     self.pending_cycles += 1
-                    print(f"\n   🔄 Pending cycles: {self.pending_cycles}")
+                    if self.debug:
+                        print(f"\n   🔄 Pending cycles: {self.pending_cycles}")
                     
                     if self.pending_cycles >= 2:
                         # Confirm! First sentence of this stream replaces old pending
                         first_sentence = extract_sentence_at_index(self.accumulated, 1)
                         self.confirmed_korean = (self.confirmed_korean + " " + first_sentence).strip()
-                        print(f"      ✅ CONFIRMED: \"{first_sentence}\" (replaces pending: \"{self.pending}\")")
-                        print(f"      → confirmed_korean: \"{self.confirmed_korean}\"")
+                        if self.debug:
+                            print(f"      ✅ CONFIRMED: \"{first_sentence}\" (replaces pending: \"{self.pending}\")")
+                            print(f"      → confirmed_korean: \"{self.confirmed_korean}\"")
                         
                         # New pending = accumulated minus confirmed first sentence
                         remaining = self.accumulated[len(first_sentence):].strip()
@@ -335,7 +340,8 @@ Important:
                         else:
                             self.pending = ""
                             self.pending_cycles = 0
-                        print(f"      ⏳ pending: \"{self.pending}\" (cycles: {self.pending_cycles})")
+                        if self.debug:
+                            print(f"      ⏳ pending: \"{self.pending}\" (cycles: {self.pending_cycles})")
                         
                         # Send confirmed update to frontend
                         await self._send_state()
@@ -344,11 +350,13 @@ Important:
                     first_sentence = extract_sentence_at_index(self.accumulated, 1)
                     self.pending = first_sentence
                     self.pending_cycles = 1
-                    print(f"\n   ⏳ NEW pending: \"{self.pending}\" (cycles: {self.pending_cycles})")
+                    if self.debug:
+                        print(f"\n   ⏳ NEW pending: \"{self.pending}\" (cycles: {self.pending_cycles})")
             else:
                 # No punctuation in this stream - reset cycles (must be consecutive)
                 if self.pending_cycles > 0:
-                    print(f"\n   ⚠️ No punctuation - resetting cycles (was {self.pending_cycles})")
+                    if self.debug:
+                        print(f"\n   ⚠️ No punctuation - resetting cycles (was {self.pending_cycles})")
                     self.pending_cycles = 0
             
         except Exception as e:
@@ -491,14 +499,16 @@ Important:
                 "live": live,
             })
             
-            print(f"\n   📡 SENT TO FRONTEND:")
-            print(f"      confirmed: \"{self.confirmed_korean[:50]}{'...' if len(self.confirmed_korean) > 50 else ''}\"")
-            print(f"      live: \"{live[:50]}{'...' if len(live) > 50 else ''}\"")
+            if self.debug:
+                print(f"\n   📡 SENT TO FRONTEND:")
+                print(f"      confirmed: \"{self.confirmed_korean[:50]}{'...' if len(self.confirmed_korean) > 50 else ''}\"")
+                print(f"      live: \"{live[:50]}{'...' if len(live) > 50 else ''}\"")
         except Exception as e:
             print(f"   ❌ Failed to send to frontend: {e}")
     
     async def shutdown(self):
-        print("\n" + "="*80)
-        print("🛑 Shutting down StreamingTranslationWorker")
-        print("="*80)
+        if self.debug:
+            print("\n" + "="*80)
+            print("🛑 Shutting down StreamingTranslationWorker")
+            print("="*80)
         self.shutdown_event.set()
