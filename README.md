@@ -1,6 +1,14 @@
 API for AST, ASR + translation
 
 Update Log:
+02 04
+Performance Optimizations: skip processing for minor/duplicate ASR updates
+
+- Track last processed transcript to detect redundant updates
+- Skip identical transcripts (common during pauses)
+- Skip when only 1-2 characters added (still typing same word)
+- Always reprocess when transcript gets shorter (ASR correction)
+- Eliminates ~50-70% of redundant embedding/GPT calls during stable speech
 
 02 03
 

@@ -155,6 +155,7 @@ class StreamingTranslationWorker:
         # ASR tracking
         self.asr_update_count = 0
         self.current_transcript = ""  # Track current English transcript
+        self.last_processed_transcript = ""  # Last transcript we actually processed
         
         # Confirmed translation tracking
         self.confirmed_korean = ""  # Accumulated confirmed Korean sentences (for embedding)
@@ -178,6 +179,12 @@ class StreamingTranslationWorker:
     async def process_transcript(self, transcript: str, is_committed: bool = False):
         """Process every ASR update by streaming full translation."""
         if not transcript.strip():
+            return
+        
+        # Skip if transcript is identical or nearly identical to last processed
+        if self._is_minor_change(transcript):
+            if self.debug:
+                print(f"⏭️  Skipping minor change: \"{transcript[-30:]}\"")
             return
         
         self.asr_update_count += 1
@@ -240,6 +247,41 @@ class StreamingTranslationWorker:
         
         # Send to frontend
         await self._send_state()
+        
+        # Mark this transcript as processed
+        self.last_processed_transcript = transcript
+    
+    def _is_minor_change(self, new_transcript: str) -> bool:
+        """
+        Check if new transcript is too similar to last processed to bother re-translating.
+        Returns True if we should skip processing.
+        """
+        if not self.last_processed_transcript:
+            return False
+        
+        # Identical transcript - definitely skip
+        if new_transcript == self.last_processed_transcript:
+            return True
+        
+        # Check character difference
+        len_diff = len(new_transcript) - len(self.last_processed_transcript)
+        
+        # If transcript got shorter (ASR correction), always process
+        if len_diff < 0:
+            return False
+        
+        # If only 1-2 characters added, skip (probably still typing same word)
+        if len_diff <= 2:
+            return True
+        
+        # If new transcript just adds to the end (common case), check how much
+        if new_transcript.startswith(self.last_processed_transcript):
+            added = new_transcript[len(self.last_processed_transcript):]
+            # Skip if just whitespace or tiny addition
+            if len(added.strip()) <= 2:
+                return True
+        
+        return False
     
     async def _stream_translate_full(self, text: str):
         """Stream translate full text and log every chunk."""
@@ -266,7 +308,7 @@ class StreamingTranslationWorker:
                         "content": f"""Translate {self.source_lang} to {self.target_lang}. Output only the translation.
 
 Important: 
-- If the source text ends with sentence-ending punctuation (. ! ?), include the same type of punctuation in your translation.
+- If the source text ends with sentence-ending punctuation (. ! ?), include the same type of punctuation in your translation. 
 - If the source text does NOT end with sentence-ending punctuation, do NOT add any ending punctuation to your translation."""
                     },
                     {
