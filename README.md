@@ -1,6 +1,61 @@
 API for AST, ASR + translation
 
 Update Log:
+
+02 05 ~ 02 09
+
+Performance - Architectural latency optimization:
+
+Latency Architecture
+
+- Total pipeline: ~600-900ms (translator only, combiner instant)
+- Latency does NOT stack: each translation is independent, not queued
+- 3-partial interval (~1.5s) > translation time (~0.9s) = no queue buildup
+- Combiner searches only last 40 words of combined (capped, O(1) vs text length)
+- combined_text grows unbounded but only tail is ever searched
+- Stale translation check (seq < latest_seq) drops outdated results
+- Tested every-2-partial cadence; reverted to every-3 — marginal UX gain
+  did not justify 50% more API calls and less stable anchor matching
+- Early 1st-partial trigger cuts initial display latency from ~1.5s to ~0.7s
+- Tone detection runs concurrently as fire-and-forget, zero blocking
+
+New implementation - tone detection, caption UX:
+
+Tone Detection (tone.py)
+
+- LLM-based Korean speech register detection (casual/casual_polite/formal/narrative - ~해... /~해요... /~합니다... /~한다...)
+- Runs once after 30 words accumulated, concurrent via asyncio.create_task
+- Zero pipeline latency impact; dynamically updates translator system prompt
+- Correctly maps stream types (Twitch → casual, YouTube → casual_polite, etc.)
+
+Translator (translationTest.py)
+
+- Early trigger: translate on 1st partial for fast initial display (~0.7s)
+- Normal cadence: every 3 partials after that (~1.5s between updates)
+- Dynamic prompt rebuilds with tone instruction when tone changes
+
+Transcript Accumulation (elevenlabsText.py)
+
+- Accumulate all committed transcripts into running history
+- Feed committed_text + current_partial to translator
+- Fixes duplication bug where ElevenLabs resets partial window after silence
+- Rolling window now slides over continuous text with no gaps
+
+Combiner (combiner.py)
+
+- Short combined (≤5 words) → replace instead of merge (fixes early duplication)
+- Minimum anchor length: 3 words (prevents false positives on common phrases)
+- Search depth: 40 words (was 20)
+- Weighted scoring: similarity × (prefix_len / max_prefix) prefers longer matches
+
+Caption Overlay (content.ts)
+
+- Scrolling teleprompter: 2-line max visible window with overflow:hidden
+- Typewriter effect on new characters (25ms/char)
+- Character-level diffing: stable prefix stays untouched (no flicker)
+- Smooth translateY scroll as new text pushes old text up
+- Overflow protection: >50 new chars → show bulk instantly, typewrite last 30
+
 02 04
 Performance Optimizations: skip processing for minor/duplicate ASR updates
 

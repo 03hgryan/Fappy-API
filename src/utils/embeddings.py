@@ -127,8 +127,8 @@ def find_source_boundary(
     if not punctuated_prefixes or punctuated_prefixes[-1][1] != full_prefix:
         punctuated_prefixes.append((len(words), full_prefix))
     
-    if debug:
-        print(f"\n      📊 Checking {len(punctuated_prefixes)} punctuation boundaries (out of {len(words)} words):")
+    # if debug:
+    #     print(f"\n      📊 Checking {len(punctuated_prefixes)} punctuation boundaries (out of {len(words)} words):")
     
     # Batch encode: punctuated prefixes + previous translation
     texts_to_encode = [p[1] for p in punctuated_prefixes] + [previous_translation]
@@ -145,8 +145,8 @@ def find_source_boundary(
     scores = []
     for (idx, prefix), score in zip(punctuated_prefixes, similarities):
         scores.append((idx, prefix, float(score)))
-        if debug:
-            print(f"         [{idx:2d}] {score:.3f} | \"{prefix}\"")
+        # if debug:
+        #     print(f"         [{idx:2d}] {score:.3f} | \"{prefix}\"")
     
     # Find best score (highest similarity)
     best_idx, best_prefix, best_score = max(scores, key=lambda x: x[2])

@@ -135,7 +135,7 @@ class StreamingTranslationWorker:
         target_lang: str = "Korean",
         model: str = "gpt-4o-mini",
         similarity_threshold: float = 0.85,
-        debug: bool = False,  # Set to True for verbose logging
+        debug: bool = True,  # Set to True for verbose logging
     ):
         self.ws = ws
         self.source_lang = source_lang
@@ -255,31 +255,15 @@ class StreamingTranslationWorker:
         """
         Check if new transcript is too similar to last processed to bother re-translating.
         Returns True if we should skip processing.
+        
+        Conservative approach: only skip if truly identical.
         """
         if not self.last_processed_transcript:
             return False
         
-        # Identical transcript - definitely skip
+        # Only skip if completely identical
         if new_transcript == self.last_processed_transcript:
             return True
-        
-        # Check character difference
-        len_diff = len(new_transcript) - len(self.last_processed_transcript)
-        
-        # If transcript got shorter (ASR correction), always process
-        if len_diff < 0:
-            return False
-        
-        # If only 1-2 characters added, skip (probably still typing same word)
-        if len_diff <= 2:
-            return True
-        
-        # If new transcript just adds to the end (common case), check how much
-        if new_transcript.startswith(self.last_processed_transcript):
-            added = new_transcript[len(self.last_processed_transcript):]
-            # Skip if just whitespace or tiny addition
-            if len(added.strip()) <= 2:
-                return True
         
         return False
     
@@ -335,8 +319,8 @@ Important:
                     punct_count = self._count_punctuation(self.accumulated)
                     
                     # Log this chunk (debug only)
-                    if self.debug:
-                        print(f"   [{chunk_num:3d}] +\"{content}\" → punct={punct_count}")
+                    # if self.debug:
+                    #     print(f"   [{chunk_num:3d}] +\"{content}\" → punct={punct_count}")
                     
                     # Send live update to frontend
                     await self._send_state()
@@ -541,10 +525,10 @@ Important:
                 "live": live,
             })
             
-            if self.debug:
-                print(f"\n   📡 SENT TO FRONTEND:")
-                print(f"      confirmed: \"{self.confirmed_korean[:50]}{'...' if len(self.confirmed_korean) > 50 else ''}\"")
-                print(f"      live: \"{live[:50]}{'...' if len(live) > 50 else ''}\"")
+            # if self.debug:
+            #     print(f"\n   📡 SENT TO FRONTEND:")
+            #     print(f"      confirmed: \"{self.confirmed_korean[:50]}{'...' if len(self.confirmed_korean) > 50 else ''}\"")
+            #     print(f"      live: \"{live[:50]}{'...' if len(live) > 50 else ''}\"")
         except Exception as e:
             print(f"   ❌ Failed to send to frontend: {e}")
     

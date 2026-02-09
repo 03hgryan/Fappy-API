@@ -8,13 +8,13 @@ import os
 
 from src.routers import websocket
 from src.routers import stt
-from src.utils.embeddings import load_model
+# from src.utils.embeddings import load_model
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Preload LaBSE at startup
-    load_model()
+    # load_model()
     yield
 
 
