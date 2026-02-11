@@ -1,11 +1,22 @@
 API for AST, ASR + translation
 
 Update Log:
+02 11
+
+Multi-provider STT support:
+
+- Added ElevenLabs Scribe v2 as an alternative STT provider alongside Speechmatics
+- Both providers share the same translation pipeline (translationExp.py + tone.py)
+- Client connects to /stt/speechmatics or /stt/elevenlabs to choose provider
+- ElevenLabs router (elevenlabs.py) uses raw WebSocket proxy to ElevenLabs API
+- Speechmatics router (speechmatics.py) uses speechmatics-rt SDK with event callbacks
+- Same sentence boundary detection, confirmed/partial translation, and tone detection
+
 02 10
 
 Architecture - Sentence-based translation pipeline:
 
-Sentence Segmentation (speechmaticsTest.py)
+Sentence Segmentation (speechmatics.py)
 
 - Punctuation-based sentence confirmation from STT stream
 - Tracks confirmed_word_count pointer into full_text, rebuilds remaining_text each update
