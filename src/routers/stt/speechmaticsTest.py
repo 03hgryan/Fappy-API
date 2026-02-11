@@ -14,6 +14,7 @@ from speechmatics.rt import (
     AudioEncoding,
 )
 from utils.translationExp import Translator
+from utils.tone import ToneDetector
 
 router = APIRouter()
 
@@ -43,7 +44,8 @@ async def stream(ws: WebSocket):
         if not closed:
             await ws.send_json({"type": "translation", "text": partial_korean})
 
-    translator = Translator(on_confirmed=on_confirmed_translation, on_partial=on_partial_translation)
+    tone_detector = ToneDetector()
+    translator = Translator(on_confirmed=on_confirmed_translation, on_partial=on_partial_translation, tone_detector=tone_detector)
 
     def get_full_text():
         if not final_text:
@@ -61,6 +63,7 @@ async def stream(ws: WebSocket):
     def update_remaining(full):
         nonlocal confirmed_text, confirmed_word_count, prev_remaining, partial_count
 
+        tone_detector.feed_text(full)
         words = full.split()
         remaining_text = " ".join(words[confirmed_word_count:])
 

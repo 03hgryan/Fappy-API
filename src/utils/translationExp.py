@@ -17,9 +17,10 @@ Rules:
 
 
 class Translator:
-    def __init__(self, on_confirmed=None, on_partial=None):
+    def __init__(self, on_confirmed=None, on_partial=None, tone_detector=None):
         self.on_confirmed = on_confirmed
         self.on_partial = on_partial
+        self.tone_detector = tone_detector
         self.translated_confirmed = ""
         self.translated_partial = ""
         self.partial_stale = False
@@ -52,7 +53,9 @@ class Translator:
             stream = await oai.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT.format(lang=TARGET_LANG)},
+                    {"role": "system", "content": SYSTEM_PROMPT.format(lang=TARGET_LANG) + (
+                        "\n\n" + self.tone_detector.get_tone_instruction() if self.tone_detector else ""
+                    )},
                     {"role": "user", "content": text},
                 ],
                 temperature=0.3,
