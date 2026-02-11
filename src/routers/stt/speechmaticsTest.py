@@ -33,12 +33,15 @@ async def stream(ws: WebSocket):
     partial_count = 0
     PARTIAL_INTERVAL = 2
     CONFIRM_PUNCT_COUNT = 1  # number of punctuation+text matches needed to confirm
+    closed = False
 
     async def on_confirmed_translation(confirmed_korean):
-        await ws.send_json({"type": "confirmed_translation", "text": confirmed_korean})
+        if not closed:
+            await ws.send_json({"type": "combined", "full": confirmed_korean})
 
     async def on_partial_translation(partial_korean):
-        await ws.send_json({"type": "partial_translation", "text": partial_korean})
+        if not closed:
+            await ws.send_json({"type": "translation", "text": partial_korean})
 
     translator = Translator(on_confirmed=on_confirmed_translation, on_partial=on_partial_translation)
 
@@ -108,8 +111,9 @@ async def stream(ws: WebSocket):
         if full and full != prev_full:
             prev_full = full
             update_remaining(full)
-            loop = asyncio.get_event_loop()
-            loop.create_task(ws.send_json({"type": "partial", "text": full}))
+            if not closed:
+                loop = asyncio.get_event_loop()
+                loop.create_task(ws.send_json({"type": "partial", "text": full}))
 
     try:
         await client.start_session(
@@ -142,4 +146,5 @@ async def stream(ws: WebSocket):
     except Exception as e:
         print(f"❌ {type(e).__name__}: {e}")
     finally:
+        closed = True
         await client.__aexit__(None, None, None)
