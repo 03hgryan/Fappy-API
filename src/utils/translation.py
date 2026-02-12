@@ -21,7 +21,7 @@ class Translator:
         self.on_partial = on_partial
         self.tone_detector = tone_detector
         self.target_lang = target_lang or TARGET_LANG
-        self.translated_confirmed = ""
+        self.translated_confirmed = ""  # not used: accumulated for debugging only
         self.translated_partial = ""
         self.partial_stale = False
 
@@ -34,7 +34,7 @@ class Translator:
             print(f"✅🌐 Source: {sentence}")
             print(f"    Translated: {translated}")
             if self.on_confirmed:
-                await self.on_confirmed(self.translated_confirmed)
+                await self.on_confirmed(translated)
 
     async def translate_partial(self, text: str):
         self.partial_stale = False

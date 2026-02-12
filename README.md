@@ -2,6 +2,17 @@ API for AST, ASR + translation
 
 Update Log:
 
+02 12
+
+Speaker diarization and incremental translation:
+
+- Speechmatics router now uses SpeakerPipeline for per-speaker sentence confirmation and translation
+- ElevenLabs router refactored to use SpeakerPipeline (single "default" speaker, no native diarization)
+- confirmed_translation now sends only the new incremental translation, not the full accumulated text
+- Translator.translated_confirmed kept for debugging only, no longer sent to frontend
+- All WebSocket messages to frontend now include `speaker` field for speaker identification
+- Added full Speechmatics source language support (56 languages including bilingual/multilingual)
+
 02 11
 
 Configurable source and target language:
