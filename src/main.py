@@ -1,13 +1,13 @@
 import os
 from contextlib import asynccontextmanager
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI
 from dotenv import load_dotenv
 
+load_dotenv()
+
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
 from src.routers import websocket
 from src.routers import stt
-
-load_dotenv()
 
 
 
