@@ -102,7 +102,7 @@ async def stream(ws: WebSocket):
                             prev_partial = current_partial
                             pipeline.feed(current_partial)
 
-                    print(f"Stream ended")
+                    print("Stream ended")
                     print(f"   Source confirmed: {pipeline.prev_text}")
                     print(f"   Translated confirmed: {pipeline.translator.translated_confirmed}")
                     print(f"   Translated partial: {pipeline.translator.translated_partial}")
