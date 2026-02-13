@@ -19,8 +19,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="ELE - WebSocket Server",
-    description="FastAPI WebSocket Server",
+    title="API for AST",
+    description="FastAPI WebSocket Server for AST",
     version="1.0.0",
     lifespan=lifespan,  # Include lifespan here
 )
@@ -39,12 +39,13 @@ app.add_middleware(
 @app.get("/")
 async def root():
     return {
-        "message": "ELE WebSocket Server",
+        "message": "API for AST",
         "version": "1.0.0",
         "docs": "/docs",
         "endpoints": {
             "websocket": "/ws/stream",
             "elevenlabs": "/stt/elevenlabs",
+            "speechmatics": "/stt/speechmatics",
         },
     }
 
@@ -69,5 +70,5 @@ app.include_router(
 async def health_check():
     return {
         "status": "healthy",
-        "service": "ELE WebSocket Server",
+        "service": "API for AST",
     }
