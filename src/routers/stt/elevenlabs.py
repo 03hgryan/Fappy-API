@@ -45,10 +45,20 @@ async def stream(ws: WebSocket):
         if not closed:
             await ws.send_json({"type": "partial_translation", "speaker": speaker_id, "text": text})
 
+    async def on_confirmed_transcript(text):
+        if not closed:
+            await ws.send_json({"type": "confirmed_transcript", "speaker": speaker_id, "text": text})
+
+    async def on_partial_transcript(text):
+        if not closed:
+            await ws.send_json({"type": "partial_transcript", "speaker": speaker_id, "text": text})
+
     pipeline = SpeakerPipeline(
         speaker_id=speaker_id,
         on_confirmed=on_confirmed,
         on_partial=on_partial,
+        on_confirmed_transcript=on_confirmed_transcript,
+        on_partial_transcript=on_partial_transcript,
         target_lang=target_lang,
         tone_detector=tone_detector,
     )

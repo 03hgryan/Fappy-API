@@ -42,10 +42,20 @@ async def stream(ws: WebSocket):
                 if not closed:
                     await ws.send_json({"type": "partial_translation", "speaker": speaker_id, "text": text})
 
+            async def on_confirmed_transcript(text):
+                if not closed:
+                    await ws.send_json({"type": "confirmed_transcript", "speaker": speaker_id, "text": text})
+
+            async def on_partial_transcript(text):
+                if not closed:
+                    await ws.send_json({"type": "partial_transcript", "speaker": speaker_id, "text": text})
+
             pipelines[speaker_id] = SpeakerPipeline(
                 speaker_id=speaker_id,
                 on_confirmed=on_confirmed,
                 on_partial=on_partial,
+                on_confirmed_transcript=on_confirmed_transcript,
+                on_partial_transcript=on_partial_transcript,
                 target_lang=target_lang,
                 tone_detector=tone_detector,
             )
@@ -102,13 +112,13 @@ async def stream(ws: WebSocket):
         for speaker, full_text in speaker_accumulated.items():
             get_or_create_pipeline(speaker).feed(full_text)
 
-        print_speaker_texts()
+        # print_speaker_texts()
 
     @client.on(ServerMessageType.ADD_PARTIAL_TRANSCRIPT)
     def on_partial(msg):
         results = msg.get("results", [])
         full_texts = get_speaker_full_texts(results)
-        print_speaker_texts(results)
+        # print_speaker_texts(results)
 
         # Feed each speaker's accumulated + partial text into their pipeline
         for speaker, full_text in full_texts.items():

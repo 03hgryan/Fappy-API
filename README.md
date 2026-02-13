@@ -2,6 +2,17 @@ API for AST, ASR + translation
 
 Update Log:
 
+02 13
+
+GPT base sentence splitter for increasing sentences w/o punctuation, live transcript streaming, silence auto-confirm:
+
+- Added SentenceSplitter (gpt-4.1-nano, Responses API, structured JSON output) to split long unpunctuated STT streams at semantic boundaries
+- Added confirmed_transcript and partial_transcript WebSocket messages for live source text display alongside translations
+- Partial transcript fires every feed() call for real-time display; partial translation stays throttled (every 2nd call)
+- Auto-confirm remaining unconfirmed text after 3 seconds of speaker silence — prevents dangling text when speaker stops mid-sentence
+- Splitter triggers when unconfirmed text exceeds 15 words with no punctuation; staleness guard discards result if natural confirmation happened during GPT latency
+- Wired on_confirmed_transcript and on_partial_transcript callbacks in both speechmatics and elevenlabs routers
+
 02 12
 
 Speaker diarization and incremental translation:
