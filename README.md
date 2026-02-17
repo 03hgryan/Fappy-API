@@ -2,6 +2,70 @@ API for AST, ASR + translation
 
 Update Log:
 
+02 15 ~ 02 16
+
+OpenAI Realtime API for translation:
+
+- Implemented RealtimeTranslator using persistent WebSocket to OpenAI Realtime API
+- All translations sent as out-of-band requests (`conversation: "none"`) with same 1ctx manual context
+- Persistent WebSocket eliminates per-request connection/auth overhead
+- Tested Realtime API models against Chat Completions baseline:
+
+  | Approach                                           | TTFT avg | Max TTFT | Total avg | Notes                                                       |
+  | -------------------------------------------------- | -------- | -------- | --------- | ----------------------------------------------------------- |
+  | 1ctx chat completions (gpt-4o-mini)                | ~410ms   | 536ms    | ~600ms    | baseline                                                    |
+  | 1ctx realtime (gpt-4o-mini-realtime-preview) run 1 | ~252ms   | 483ms    | ~307ms    | 25 samples                                                  |
+  | 1ctx realtime (gpt-4o-mini-realtime-preview) run 2 | ~272ms   | 655ms    | —         | 40 samples                                                  |
+  | 1ctx realtime (gpt-4o-mini-realtime-preview) run 3 | ~278ms   | 714ms    | ~360ms    | 50 samples, degrades over time (~194ms early → ~308ms late) |
+  | 1ctx realtime (gpt-realtime) run 1                 | ~252ms   | 483ms    | ~335ms    |                                                             |
+  | 1ctx realtime (gpt-realtime) run 2                 | ~355ms   | 1730ms   | —         | spiky, unstable                                             |
+  | 1ctx realtime (gpt-realtime-mini) run 1            | ~215ms   | 467ms    | ~270ms    |                                                             |
+  | 1ctx realtime (gpt-realtime-mini) run 2            | ~216ms   | 351ms    | ~283ms    | 27 samples, no spikes, no degradation                       |
+  - All Realtime API models significantly faster than Chat Completions (~48-50% TTFT reduction)
+  - `gpt-realtime-mini`: most consistent — ~216ms avg TTFT, max 351ms, stable throughout long sessions
+  - `gpt-4o-mini-realtime-preview`: fast early but degrades over session, occasional spikes (687ms, 714ms)
+  - `gpt-realtime`: inconsistent — stable on one run, spiky (1730ms) on another
+  - Winner: `gpt-realtime-mini` — stable latency, no degradation, no spikes
+
+- Also tested in-band conversation history (confirmed translations added to conversation):
+  - CONFIRMED TTFT avg ~292ms vs ~259ms out-of-band — ~30ms slower due to server-side context processing
+  - Overhead grows with conversation length (same issue as Responses API)
+  - Translation quality comparable to manual 1ctx
+  - Reverted to all out-of-band with manual 1ctx
+
+- Added translator type toggle (Chat Completions / Realtime API) in frontend settings
+- RealtimeTranslator uses `_send_lock` + `_creation_queue` for safe concurrent request tracking
+
+Translation context window, configurable pipeline settings, per-speaker captions:
+
+- Added previous confirmed source+translation pair as context to GPT translation prompt for better coherence
+- Tested 0ctx, 1ctx, and 3ctx and chose 1ctx based on latency/quality tradeoff:
+
+  | Approach                             | TTFT avg | Max TTFT | Total avg |
+  | ------------------------------------ | -------- | -------- | --------- |
+  | 0ctx (chat completions)              | ~330ms   | 528ms    | ~560ms    |
+  | 1ctx single msg (chat completions)   | ~410ms   | 536ms    | ~600ms    |
+  | 1ctx multi-turn (chat completions)   | ~540ms   | 946ms    | ~730ms    |
+  | 3ctx single msg (chat completions)   | ~570ms   | 1843ms   | ~830ms    |
+  | Responses API (previous_response_id) | ~790ms   | 1460ms   | ~1050ms   |
+  - 3ctx: dangerous spikes (1.8s TTFT), ~70% overhead
+  - Multi-turn: message structure overhead worse than single-message context
+  - Responses API: server-side state management adds ~380ms overhead, not worth it for 1 context pair
+  - Winner: 1ctx single msg — only ~80ms overhead, no spikes, good translation consistency (pronouns, terminology, style)
+  - Context formatted as "Previous context:\nSource: ...\nTranslation: ...\n\nTranslate: ..." in user message
+
+- Added configurable aggressiveness setting (passed as number via query param):
+  - 1 (high): confirm_punct_count=1, sentence splitter ON — faster confirmations
+  - 2 (low): confirm_punct_count=2, sentence splitter OFF — waits for more punctuation
+- Added configurable update frequency (partial_interval) via query param
+- Added configurable media delay (video + audio + caption scheduling) from frontend
+- Per-speaker caption boxes in content script with distinct colors per speaker (green, blue, pink, yellow, purple)
+- Translation caption: fixed-height scrollable box, confirmed in speaker color, partial on new line, "..." placeholder between confirmed and next partial to prevent layout jump
+
+02 14
+
+Tested Deepgram Nova stream diarization, Assembly AI API
+
 02 13
 
 GPT base sentence splitter for increasing sentences w/o punctuation, live transcript streaming, silence auto-confirm:

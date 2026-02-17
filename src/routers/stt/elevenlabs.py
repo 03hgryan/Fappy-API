@@ -6,6 +6,7 @@ Endpoint: /stt/elevenlabs
 
 import os
 import json
+import time
 import asyncio
 import websockets
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -29,29 +30,37 @@ async def stream(ws: WebSocket):
         return
 
     closed = False
+    stream_ending = False
     target_lang = ws.query_params.get("target_lang", "Korean")
+    aggressiveness = int(ws.query_params.get("aggressiveness", "1"))
+    confirm_punct_count = 1 if aggressiveness <= 1 else 2
+    use_splitter = aggressiveness <= 1
+    partial_interval = int(ws.query_params.get("update_frequency", "2"))
+    use_realtime = True
     tone_detector = ToneDetector(target_lang=target_lang)
 
+    committed_text = ""
     current_partial = ""
     prev_partial = ""
 
+    stream_start = time.time()
     speaker_id = "default"
 
-    async def on_confirmed(text):
+    async def on_confirmed(text, elapsed_ms=0):
         if not closed:
-            await ws.send_json({"type": "confirmed_translation", "speaker": speaker_id, "text": text})
+            await ws.send_json({"type": "confirmed_translation", "speaker": speaker_id, "text": text, "elapsed_ms": elapsed_ms})
 
-    async def on_partial(text):
+    async def on_partial(text, elapsed_ms=0):
         if not closed:
-            await ws.send_json({"type": "partial_translation", "speaker": speaker_id, "text": text})
+            await ws.send_json({"type": "partial_translation", "speaker": speaker_id, "text": text, "elapsed_ms": elapsed_ms})
 
-    async def on_confirmed_transcript(text):
+    async def on_confirmed_transcript(text, elapsed_ms=0):
         if not closed:
-            await ws.send_json({"type": "confirmed_transcript", "speaker": speaker_id, "text": text})
+            await ws.send_json({"type": "confirmed_transcript", "speaker": speaker_id, "text": text, "elapsed_ms": elapsed_ms})
 
-    async def on_partial_transcript(text):
+    async def on_partial_transcript(text, elapsed_ms=0):
         if not closed:
-            await ws.send_json({"type": "partial_transcript", "speaker": speaker_id, "text": text})
+            await ws.send_json({"type": "partial_transcript", "speaker": speaker_id, "text": text, "elapsed_ms": elapsed_ms})
 
     pipeline = SpeakerPipeline(
         speaker_id=speaker_id,
@@ -61,6 +70,11 @@ async def stream(ws: WebSocket):
         on_partial_transcript=on_partial_transcript,
         target_lang=target_lang,
         tone_detector=tone_detector,
+        stream_start=stream_start,
+        confirm_punct_count=confirm_punct_count,
+        use_splitter=use_splitter,
+        partial_interval=partial_interval,
+        use_realtime=use_realtime,
     )
 
     async def forward_audio(elevenlabs_ws):
@@ -81,7 +95,8 @@ async def stream(ws: WebSocket):
                         "sample_rate": 16000,
                     }))
                 elif msg_type == "end_stream":
-                    print("Stream ended")
+                    print("Stream ending, sending final commit")
+                    stream_ending = True
                     await elevenlabs_ws.send(json.dumps({
                         "message_type": "input_audio_chunk",
                         "audio_base_64": "",
@@ -97,7 +112,7 @@ async def stream(ws: WebSocket):
 
     async def forward_transcripts(elevenlabs_ws):
         """Forward transcripts from ElevenLabs to client and process for translation"""
-        nonlocal current_partial, prev_partial, closed
+        nonlocal committed_text, current_partial, prev_partial, closed
 
         try:
             async for message in elevenlabs_ws:
@@ -107,19 +122,20 @@ async def stream(ws: WebSocket):
 
                 if msg_type == "committed_transcript":
                     if text:
-                        current_partial = text
-                        if current_partial != prev_partial:
-                            prev_partial = current_partial
-                            pipeline.feed(current_partial)
+                        committed_text = (committed_text + " " + text).strip() if committed_text else text
+                        if committed_text != prev_partial:
+                            prev_partial = committed_text
+                            pipeline.feed(committed_text)
 
-                    print("Stream ended")
-                    print(f"   Source confirmed: {pipeline.prev_text}")
-                    print(f"   Translated confirmed: {pipeline.translator.translated_confirmed}")
-                    print(f"   Translated partial: {pipeline.translator.translated_partial}")
-                    break
+                    if stream_ending:
+                        print("Stream ended")
+                        print(f"   Source confirmed: {pipeline.prev_text}")
+                        print(f"   Translated confirmed: {pipeline.translator.translated_confirmed}")
+                        print(f"   Translated partial: {pipeline.translator.translated_partial}")
+                        break
 
                 elif msg_type == "partial_transcript":
-                    current_partial = text
+                    current_partial = (committed_text + " " + text).strip() if committed_text else text
                     if current_partial and current_partial != prev_partial:
                         prev_partial = current_partial
                         pipeline.feed(current_partial)

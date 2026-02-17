@@ -21,34 +21,45 @@ class Translator:
         self.on_partial = on_partial
         self.tone_detector = tone_detector
         self.target_lang = target_lang or TARGET_LANG
-        self.translated_confirmed = ""  # not used: accumulated for debugging only
+        self.translated_confirmed = ""  # accumulated for debugging only
         self.translated_partial = ""
-        self.partial_stale = False
+        self.context_pairs: list[tuple[str, str]] = []  # last 1 (source, translation) confirmed pair
 
-    async def translate_confirmed(self, sentence: str):
-        self.partial_stale = True
-        translated = await self._call_gpt(sentence)
+    async def translate_confirmed(self, sentence: str, elapsed_ms: int = 0):
+        word_count = len(sentence.split())
+        context = self._build_context()
+        translated = await self._call_gpt(sentence, f"CONFIRMED ({word_count}w, {len(self.context_pairs)}ctx)", context)
         if translated:
             self.translated_confirmed = (self.translated_confirmed + " " + translated).strip() if self.translated_confirmed else translated
             self.translated_partial = ""
-            print(f"✅🌐 Source: {sentence}")
-            print(f"    Translated: {translated}")
+            self.context_pairs.append((sentence, translated))
+            if len(self.context_pairs) > 1:
+                self.context_pairs.pop(0)
             if self.on_confirmed:
-                await self.on_confirmed(translated)
+                await self.on_confirmed(translated, elapsed_ms)
 
-    async def translate_partial(self, text: str):
-        self.partial_stale = False
-        translated = await self._call_gpt(text)
-        if translated and not self.partial_stale:
+    async def translate_partial(self, text: str, elapsed_ms: int = 0):
+        word_count = len(text.split())
+        context = self._build_context()
+        translated = await self._call_gpt(text, f"PARTIAL ({word_count}w, {len(self.context_pairs)}ctx)", context)
+        if translated:
             self.translated_partial = translated
-            print(f"⏳🌐 Source: {text}")
-            print(f"    Translated: {translated}")
             if self.on_partial:
-                await self.on_partial(self.translated_partial)
+                await self.on_partial(self.translated_partial, elapsed_ms)
 
-    async def _call_gpt(self, text: str) -> str:
+    def _build_context(self) -> str:
+        if not self.context_pairs:
+            return ""
+        lines = []
+        for source, translation in self.context_pairs:
+            lines.append(f"Source: {source}\nTranslation: {translation}")
+        return "Previous context:\n" + "\n\n".join(lines)
+
+    async def _call_gpt(self, text: str, label: str = "", context: str = "") -> str:
         try:
             t_start = time.monotonic()
+
+            user_content = f"{context}\n\nTranslate: {text}" if context else text
 
             stream = await oai.chat.completions.create(
                 model="gpt-4o-mini",
@@ -56,7 +67,7 @@ class Translator:
                     {"role": "system", "content": SYSTEM_PROMPT.format(lang=self.target_lang) + (
                         "\n\n" + self.tone_detector.get_tone_instruction() if self.tone_detector else ""
                     )},
-                    {"role": "user", "content": text},
+                    {"role": "user", "content": user_content},
                 ],
                 temperature=0.3,
                 max_tokens=200,
@@ -73,7 +84,10 @@ class Translator:
                     translated += delta
 
             total_ms = (time.monotonic() - t_start) * 1000
-            print(f"    ⏱️ ttft:{ttft:.0f}ms total:{total_ms:.0f}ms")
+            ttft_str = f"{ttft:.0f}" if ttft is not None else "n/a"
+            print(f"🌐 [{label}] ttft:{ttft_str}ms total:{total_ms:.0f}ms")
+            print(f"    Source: {text}")
+            print(f"    Result: {translated.strip()}")
 
             return translated.strip()
 

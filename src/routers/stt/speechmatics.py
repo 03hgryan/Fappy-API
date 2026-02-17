@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import time
 import asyncio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from speechmatics.rt import (
@@ -26,7 +27,14 @@ async def stream(ws: WebSocket):
     closed = False
     target_lang = ws.query_params.get("target_lang", "Korean")
     source_lang = ws.query_params.get("source_lang", "en")
+    aggressiveness = int(ws.query_params.get("aggressiveness", "1"))
+    confirm_punct_count = 1 if aggressiveness <= 1 else 2
+    use_splitter = aggressiveness <= 1
+    partial_interval = int(ws.query_params.get("update_frequency", "2"))
+    use_realtime = True
     tone_detector = ToneDetector(target_lang=target_lang)
+
+    stream_start = time.time()
 
     # Per-speaker state
     speaker_accumulated: dict[str, str] = {}
@@ -34,21 +42,21 @@ async def stream(ws: WebSocket):
 
     def get_or_create_pipeline(speaker_id: str) -> SpeakerPipeline:
         if speaker_id not in pipelines:
-            async def on_confirmed(text):
+            async def on_confirmed(text, elapsed_ms=0):
                 if not closed:
-                    await ws.send_json({"type": "confirmed_translation", "speaker": speaker_id, "text": text})
+                    await ws.send_json({"type": "confirmed_translation", "speaker": speaker_id, "text": text, "elapsed_ms": elapsed_ms})
 
-            async def on_partial(text):
+            async def on_partial(text, elapsed_ms=0):
                 if not closed:
-                    await ws.send_json({"type": "partial_translation", "speaker": speaker_id, "text": text})
+                    await ws.send_json({"type": "partial_translation", "speaker": speaker_id, "text": text, "elapsed_ms": elapsed_ms})
 
-            async def on_confirmed_transcript(text):
+            async def on_confirmed_transcript(text, elapsed_ms=0):
                 if not closed:
-                    await ws.send_json({"type": "confirmed_transcript", "speaker": speaker_id, "text": text})
+                    await ws.send_json({"type": "confirmed_transcript", "speaker": speaker_id, "text": text, "elapsed_ms": elapsed_ms})
 
-            async def on_partial_transcript(text):
+            async def on_partial_transcript(text, elapsed_ms=0):
                 if not closed:
-                    await ws.send_json({"type": "partial_transcript", "speaker": speaker_id, "text": text})
+                    await ws.send_json({"type": "partial_transcript", "speaker": speaker_id, "text": text, "elapsed_ms": elapsed_ms})
 
             pipelines[speaker_id] = SpeakerPipeline(
                 speaker_id=speaker_id,
@@ -58,6 +66,11 @@ async def stream(ws: WebSocket):
                 on_partial_transcript=on_partial_transcript,
                 target_lang=target_lang,
                 tone_detector=tone_detector,
+                stream_start=stream_start,
+                confirm_punct_count=confirm_punct_count,
+                use_splitter=use_splitter,
+                partial_interval=partial_interval,
+                use_realtime=use_realtime,
             )
         return pipelines[speaker_id]
 
