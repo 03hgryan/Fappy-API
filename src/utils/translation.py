@@ -27,9 +27,10 @@ Summary:"""
 
 
 class Translator:
-    def __init__(self, on_confirmed=None, on_partial=None, tone_detector=None, target_lang=None):
+    def __init__(self, on_confirmed=None, on_partial=None, on_partial_delta=None, tone_detector=None, target_lang=None):
         self.on_confirmed = on_confirmed
         self.on_partial = on_partial
+        self.on_partial_delta = on_partial_delta
         self.tone_detector = tone_detector
         self.target_lang = target_lang or TARGET_LANG
         self.translated_confirmed = ""  # accumulated for debugging only
@@ -38,6 +39,7 @@ class Translator:
         self.confirmed_transcript = ""  # full accumulated transcript for summary
         self.topic_summary = ""
         self._summary_task: asyncio.Task | None = None
+        self._partial_generation: int = 0
 
     async def translate_confirmed(self, sentence: str, elapsed_ms: int = 0):
         word_count = len(sentence.split())
@@ -55,10 +57,15 @@ class Translator:
                 await self.on_confirmed(translated, elapsed_ms)
 
     async def translate_partial(self, text: str, elapsed_ms: int = 0):
+        self._partial_generation += 1
+        gen = self._partial_generation
         word_count = len(text.split())
         context = self._build_context()
-        translated = await self._call_gpt(text, f"PARTIAL ({word_count}w)", context)
-        if translated:
+        translated = await self._call_gpt(
+            text, f"PARTIAL ({word_count}w)", context,
+            delta_cb=self.on_partial_delta, generation=gen, elapsed_ms=elapsed_ms,
+        )
+        if translated and gen == self._partial_generation:
             self.translated_partial = translated
             if self.on_partial:
                 await self.on_partial(self.translated_partial, elapsed_ms)
@@ -94,7 +101,8 @@ class Translator:
         except Exception as e:
             print(f"Summary error: {type(e).__name__}: {e}")
 
-    async def _call_gpt(self, text: str, label: str = "", context: str = "") -> str:
+    async def _call_gpt(self, text: str, label: str = "", context: str = "",
+                        delta_cb=None, generation: int = 0, elapsed_ms: int = 0) -> str:
         try:
             t_start = time.monotonic()
 
@@ -121,6 +129,8 @@ class Translator:
                     if ttft is None:
                         ttft = (time.monotonic() - t_start) * 1000
                     translated += delta
+                    if delta_cb and generation == self._partial_generation:
+                        await delta_cb(delta, generation, elapsed_ms)
 
             total_ms = (time.monotonic() - t_start) * 1000
             ttft_str = f"{ttft:.0f}" if ttft is not None else "n/a"

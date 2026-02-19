@@ -64,6 +64,10 @@ async def stream(ws: WebSocket):
         if not closed:
             await ws.send_json({"type": "partial_transcript", "speaker": speaker_id, "text": text, "elapsed_ms": elapsed_ms})
 
+    async def on_partial_delta(delta, generation, elapsed_ms=0):
+        if not closed:
+            await ws.send_json({"type": "partial_translation_delta", "speaker": speaker_id, "delta": delta, "generation": generation, "elapsed_ms": elapsed_ms})
+
     pipeline = SpeakerPipeline(
         speaker_id=speaker_id,
         on_confirmed=on_confirmed,
@@ -78,6 +82,7 @@ async def stream(ws: WebSocket):
         partial_interval=partial_interval,
         use_realtime=use_realtime,
         use_deepl=use_deepl,
+        on_partial_delta=on_partial_delta,
     )
 
     async def forward_audio(elevenlabs_ws):

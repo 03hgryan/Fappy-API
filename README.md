@@ -2,6 +2,18 @@ API for AST, ASR + translation
 
 Update Log:
 
+02 19
+
+Incremental streaming output for partial translations:
+
+- Stream each translated token to the client as it arrives from GPT, instead of waiting for the full translation to complete
+- New WebSocket message `partial_translation_delta` with `{delta, generation, elapsed_ms}` fires per token
+- Existing `partial_translation` (full text) still fires at the end for backward compatibility
+- Generation counter prevents stale deltas from leaking when a new partial starts mid-stream — old generation's deltas are silently dropped
+- Reduces time-to-first-visible-token from ~370-585ms (full response wait) to ~50-100ms (first token)
+- Works across all translator backends: GPT Chat (`translation.py`), Realtime API (`translation_realtime.py`), and DeepL hybrid (`translation_deepl.py` delegates partials to Realtime)
+- Wired through `SpeakerPipeline` → both ElevenLabs and Speechmatics routers
+
 02 17 ~ 02 19
 
 DeepL + GPT Realtime hybrid translation, expanded language support:

@@ -15,7 +15,7 @@ SILENCE_CONFIRM_SEC = 3.0
 class SpeakerPipeline:
     """Per-speaker sentence confirmation and translation pipeline."""
 
-    def __init__(self, speaker_id: str, on_confirmed, on_partial, on_confirmed_transcript, on_partial_transcript, target_lang: str, tone_detector: ToneDetector, stream_start: float = 0.0, confirm_punct_count: int = CONFIRM_PUNCT_COUNT, use_splitter: bool = True, partial_interval: int = PARTIAL_INTERVAL, use_realtime: bool = False, use_deepl: bool = False):
+    def __init__(self, speaker_id: str, on_confirmed, on_partial, on_confirmed_transcript, on_partial_transcript, target_lang: str, tone_detector: ToneDetector, stream_start: float = 0.0, confirm_punct_count: int = CONFIRM_PUNCT_COUNT, use_splitter: bool = True, partial_interval: int = PARTIAL_INTERVAL, use_realtime: bool = False, use_deepl: bool = False, on_partial_delta=None):
         self.speaker_id = speaker_id
         self.confirmed_word_count = 0
         self.partial_count = 0
@@ -41,6 +41,7 @@ class SpeakerPipeline:
         self.translator = TranslatorClass(
             on_confirmed=on_confirmed,
             on_partial=on_partial,
+            on_partial_delta=on_partial_delta,
             tone_detector=tone_detector,
             target_lang=target_lang,
         )

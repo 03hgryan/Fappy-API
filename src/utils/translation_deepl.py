@@ -37,9 +37,10 @@ Summary:"""
 class DeepLTranslator:
     """Translator using DeepL text translation API with free context injection."""
 
-    def __init__(self, on_confirmed=None, on_partial=None, tone_detector=None, target_lang=None):
+    def __init__(self, on_confirmed=None, on_partial=None, on_partial_delta=None, tone_detector=None, target_lang=None):
         self.on_confirmed = on_confirmed
         self.on_partial = on_partial
+        self.on_partial_delta = on_partial_delta
         self.tone_detector = tone_detector
         self.target_lang = target_lang or "Korean"
         self.deepl_target = TARGET_LANG_MAP.get(self.target_lang, "EN-US")
@@ -54,6 +55,7 @@ class DeepLTranslator:
         self._rt = RealtimeTranslator(
             on_confirmed=None,
             on_partial=on_partial,
+            on_partial_delta=on_partial_delta,
             tone_detector=tone_detector,
             target_lang=target_lang,
         )

@@ -27,23 +27,30 @@ Summary:"""
 
 
 class _ResponseTracker:
-    __slots__ = ("label", "source", "future", "text", "ttft", "start_time")
+    __slots__ = ("label", "source", "future", "text", "ttft", "start_time",
+                 "delta_cb", "generation", "elapsed_ms", "translator")
 
-    def __init__(self, label: str, source: str):
+    def __init__(self, label: str, source: str, delta_cb=None,
+                 generation: int = 0, elapsed_ms: int = 0, translator=None):
         self.label = label
         self.source = source
         self.future: asyncio.Future = asyncio.get_event_loop().create_future()
         self.text = ""
         self.ttft: float | None = None
         self.start_time = time.monotonic()
+        self.delta_cb = delta_cb
+        self.generation = generation
+        self.elapsed_ms = elapsed_ms
+        self.translator = translator
 
 
 class RealtimeTranslator:
     """Translator using OpenAI Realtime API over persistent WebSocket."""
 
-    def __init__(self, on_confirmed=None, on_partial=None, tone_detector=None, target_lang=None):
+    def __init__(self, on_confirmed=None, on_partial=None, on_partial_delta=None, tone_detector=None, target_lang=None):
         self.on_confirmed = on_confirmed
         self.on_partial = on_partial
+        self.on_partial_delta = on_partial_delta
         self.tone_detector = tone_detector
         self.target_lang = target_lang or "Korean"
         self.translated_confirmed = ""
@@ -52,6 +59,7 @@ class RealtimeTranslator:
         self.confirmed_transcript = ""  # full accumulated transcript for summary
         self.topic_summary = ""
         self._summary_task: asyncio.Task | None = None
+        self._partial_generation: int = 0
 
         self._ws = None
         self._connected = False
@@ -152,7 +160,12 @@ class RealtimeTranslator:
                     if tracker:
                         if tracker.ttft is None:
                             tracker.ttft = (time.monotonic() - tracker.start_time) * 1000
-                        tracker.text += event.get("delta", "")
+                        delta_text = event.get("delta", "")
+                        tracker.text += delta_text
+                        if (delta_text and tracker.delta_cb and tracker.translator
+                                and tracker.generation == tracker.translator._partial_generation):
+                            asyncio.create_task(tracker.delta_cb(
+                                delta_text, tracker.generation, tracker.elapsed_ms))
 
                 elif t == "response.text.done":
                     resp_id = event.get("response_id")
@@ -192,14 +205,19 @@ class RealtimeTranslator:
                     tracker.future.set_result("")
             self._response_map.clear()
 
-    async def _send_translation(self, text: str, label: str) -> str:
+    async def _send_translation(self, text: str, label: str,
+                                delta_cb=None, generation: int = 0, elapsed_ms: int = 0) -> str:
         """Send an out-of-band translation request and wait for result."""
         await self._ensure_connected()
 
         context = self._build_context()
         user_content = f"{context}\n\nTranslate: {text}" if context else text
 
-        tracker = _ResponseTracker(label=label, source=text)
+        tracker = _ResponseTracker(
+            label=label, source=text,
+            delta_cb=delta_cb, generation=generation,
+            elapsed_ms=elapsed_ms, translator=self,
+        )
 
         async with self._send_lock:
             await self._creation_queue.put(tracker)
@@ -241,11 +259,14 @@ class RealtimeTranslator:
                 await self.on_confirmed(translated, elapsed_ms)
 
     async def translate_partial(self, text: str, elapsed_ms: int = 0):
+        self._partial_generation += 1
+        gen = self._partial_generation
         word_count = len(text.split())
         translated = await self._send_translation(
-            text, f"PARTIAL ({word_count}w)"
+            text, f"PARTIAL ({word_count}w)",
+            delta_cb=self.on_partial_delta, generation=gen, elapsed_ms=elapsed_ms,
         )
-        if translated:
+        if translated and gen == self._partial_generation:
             self.translated_partial = translated
             if self.on_partial:
                 await self.on_partial(self.translated_partial, elapsed_ms)
