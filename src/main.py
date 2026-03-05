@@ -10,6 +10,7 @@ from src.routers import websocket
 from src.routers import stt
 from src.routers import auth as auth_router
 from src.routers import feedback as feedback_router
+from src.routers import interest as interest_router
 from src.auth.config import AUTH_ENABLED
 
 
@@ -78,6 +79,13 @@ app.include_router(
     feedback_router.router,
     prefix="/feedback",
     tags=["feedback"],
+)
+
+# Mount interest router
+app.include_router(
+    interest_router.router,
+    prefix="/interest",
+    tags=["interest"],
 )
 
 

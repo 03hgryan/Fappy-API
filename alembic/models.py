@@ -28,3 +28,15 @@ class Feedback(Base):
     email = Column(String, nullable=True)
     user_id = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ApiInterest(Base):
+    __tablename__ = "api_interest"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email = Column(String, unique=True, nullable=False, index=True)
+    name = Column(String, nullable=True)
+    company = Column(String, nullable=True)
+    api_needed = Column(String, nullable=True)
+    use_case = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

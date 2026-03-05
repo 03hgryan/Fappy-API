@@ -28,6 +28,30 @@ def insert_feedback(message: str, email: str | None = None, user_id: str | None 
     return result.data[0] if result.data else row
 
 
+def insert_api_interest(
+    email: str,
+    name: str | None = None,
+    company: str | None = None,
+    api_needed: str | None = None,
+    use_case: str | None = None,
+) -> dict:
+    sb = get_supabase()
+    row: dict = {
+        "email": email,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if name:
+        row["name"] = name
+    if company:
+        row["company"] = company
+    if api_needed:
+        row["api_needed"] = api_needed
+    if use_case:
+        row["use_case"] = use_case
+    result = sb.table("api_interest").insert(row).execute()
+    return result.data[0] if result.data else row
+
+
 def upsert_user(google_id: str, email: str, name: str | None, picture_url: str | None) -> dict:
     sb = get_supabase()
     row = {
