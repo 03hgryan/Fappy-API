@@ -25,9 +25,7 @@ async def require_ws_auth(ws: WebSocket) -> dict | None:
         return {"sub": "dev", "email": "dev@localhost"}
     token = ws.query_params.get("token")
     if not token:
-        await ws.send_json({"type": "error", "message": "Authentication required"})
-        await ws.close(code=4001)
-        return None
+        return {"sub": "guest", "email": None}
     payload = verify_token(token)
     if payload is None:
         await ws.send_json({"type": "error", "message": "Invalid or expired token"})

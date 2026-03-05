@@ -14,6 +14,20 @@ def get_supabase() -> Client:
     return _client
 
 
+def insert_feedback(message: str, email: str | None = None, user_id: str | None = None) -> dict:
+    sb = get_supabase()
+    row: dict = {
+        "message": message,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if email:
+        row["email"] = email
+    if user_id:
+        row["user_id"] = user_id
+    result = sb.table("feedback").insert(row).execute()
+    return result.data[0] if result.data else row
+
+
 def upsert_user(google_id: str, email: str, name: str | None, picture_url: str | None) -> dict:
     sb = get_supabase()
     row = {
