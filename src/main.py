@@ -24,7 +24,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="API for AST",
     description="FastAPI WebSocket Server for AST",
-    version="1.0.0",
+    version="1.0.1",
     lifespan=lifespan,  # Include lifespan here
 )
 
