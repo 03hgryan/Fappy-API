@@ -29,7 +29,7 @@ app = FastAPI(
 )
 
 # CORS configuration
-origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8000").split(",")
+origins = os.getenv("ALLOWED_ORIGINS", "https://typingo.dev,https://www.typingo.dev,http://localhost:5173,http://localhost:3000,http://localhost:8000").split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
