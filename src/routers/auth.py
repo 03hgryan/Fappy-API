@@ -6,14 +6,17 @@ Endpoints: /auth/google/login, /auth/google/callback, /auth/me
 import secrets
 from urllib.parse import urlencode, urlparse, parse_qs
 
+from datetime import datetime, timezone
+
 import httpx
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import RedirectResponse, JSONResponse
+from sqlalchemy import text
 
 from auth.config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, AUTH_ENABLED
 from auth.jwt_utils import create_access_token
-from auth.supabase_client import upsert_user
 from auth.dependencies import get_current_user
+from database import get_engine
 
 router = APIRouter()
 
@@ -98,13 +101,31 @@ async def google_callback(
             )
         userinfo = userinfo_resp.json()
 
-    # Upsert user in Supabase
-    user = upsert_user(
-        google_id=userinfo["id"],
-        email=userinfo["email"],
-        name=userinfo.get("name"),
-        picture_url=userinfo.get("picture"),
-    )
+    # Upsert user in database
+    with get_engine().connect() as conn:
+        result = conn.execute(
+            text(
+                "INSERT INTO users (google_id, email, name, picture_url, last_login) "
+                "VALUES (:google_id, :email, :name, :picture_url, :last_login) "
+                "ON CONFLICT (google_id) DO UPDATE SET "
+                "  email = EXCLUDED.email, "
+                "  name = EXCLUDED.name, "
+                "  picture_url = EXCLUDED.picture_url, "
+                "  last_login = EXCLUDED.last_login, "
+                "  updated_at = now() "
+                "RETURNING id"
+            ),
+            {
+                "google_id": userinfo["id"],
+                "email": userinfo["email"],
+                "name": userinfo.get("name"),
+                "picture_url": userinfo.get("picture"),
+                "last_login": datetime.now(timezone.utc),
+            },
+        )
+        conn.commit()
+        row = result.fetchone()
+    user = {"id": row[0] if row else userinfo["id"]}
 
     # Mint JWT
     jwt_token = create_access_token(
