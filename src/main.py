@@ -22,10 +22,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="API for AST",
-    description="FastAPI WebSocket Server for AST",
-    version="1.0.1",
-    lifespan=lifespan,  # Include lifespan here
+    title="Typingo API",
+    description="Real-time speech translation and transcription API for Typingo",
+    version="1.0.2",
+    lifespan=lifespan,
 )
 
 # CORS configuration
@@ -42,14 +42,20 @@ app.add_middleware(
 @app.get("/")
 async def root():
     return {
-        "message": "API for AST",
-        "version": "1.0.1",
+        "message": "Typingo API",
+        "description": "Real-time speech translation and transcription",
+        "version": "1.0.2",
         "docs": "/docs",
         "endpoints": {
             "websocket": "/ws/stream",
-            "elevenlabs": "/stt/elevenlabs",
-            "speechmatics": "/stt/speechmatics",
+            "stt_elevenlabs": "/stt/elevenlabs",
+            "stt_speechmatics": "/stt/speechmatics",
+            "auth_login": "/auth/google/login",
+            "auth_callback": "/auth/google/callback",
+            "auth_me": "/auth/me",
+            "feedback": "/feedback",
         },
+        "auth_enabled": AUTH_ENABLED,
     }
 
 
