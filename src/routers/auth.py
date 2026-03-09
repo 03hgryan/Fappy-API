@@ -9,7 +9,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import RedirectResponse, JSONResponse
 from sqlalchemy import text
 
@@ -56,6 +56,7 @@ async def google_login(
 
 @router.get("/google/callback")
 async def google_callback(
+    request: Request,
     code: str = Query(...),
     state: str = Query(default=""),
 ):
@@ -67,8 +68,8 @@ async def google_callback(
     if "|" in state:
         _, ext_redirect = state.split("|", 1)
 
-    # Determine callback URL (must match what was used in /login)
-    callback_url = "http://localhost:8000/auth/google/callback"
+    # Determine callback URL (must exactly match what was used in /login)
+    callback_url = str(request.url).split("?")[0]
 
     # Exchange code for tokens
     async with httpx.AsyncClient() as client:
