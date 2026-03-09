@@ -39,7 +39,11 @@ async def stream(ws: WebSocket):
     translator_type = ws.query_params.get("translator", "realtime")
     use_realtime = translator_type == "realtime"
     use_deepl = translator_type == "deepl"
-    tone_detector = ToneDetector(target_lang=target_lang)
+    async def on_tone_detected(tone: str):
+        if not closed:
+            await ws.send_json({"type": "tone_detected", "tone": tone})
+
+    tone_detector = ToneDetector(target_lang=target_lang, on_detected=on_tone_detected)
 
     stream_start = time.time()
 
@@ -170,6 +174,7 @@ async def stream(ws: WebSocket):
             audio_format=AudioFormat(encoding="pcm_s16le", chunk_size=4096, sample_rate=16000),
         )
         await ws.send_json({"type": "session_started", "data": {"status": "connected"}})
+        await ws.send_json({"type": "tone_detecting"})
 
         while True:
             message = await ws.receive()
@@ -187,6 +192,86 @@ async def stream(ws: WebSocket):
 
     except WebSocketDisconnect:
         print("👋 Disconnected")
+    except Exception as e:
+        print(f"❌ {type(e).__name__}: {e}")
+    finally:
+        closed = True
+        await client.__aexit__(None, None, None)
+
+
+@router.websocket("/transcript")
+async def stream_transcript_only(ws: WebSocket):
+    """Transcription only — no translation pipeline."""
+    await ws.accept()
+    user = await require_ws_auth(ws)
+    if AUTH_ENABLED and user is None:
+        return
+
+    closed = False
+    source_lang = ws.query_params.get("source_lang", "en")
+    speaker_accumulated: dict[str, str] = {}
+
+    def parse_speaker_texts(results):
+        texts: dict[str, str] = {}
+        for r in results:
+            if r.get("type") not in ("word", "punctuation"):
+                continue
+            content = r["alternatives"][0]["content"]
+            speaker = r["alternatives"][0].get("speaker", "unknown")
+            if speaker not in texts:
+                texts[speaker] = ""
+            if r["type"] == "punctuation":
+                texts[speaker] = texts[speaker].rstrip() + content
+            else:
+                texts[speaker] += (" " + content) if texts[speaker] else content
+        return texts
+
+    client = AsyncClient(api_key=SPEECHMATICS_API_KEY)
+    await client.__aenter__()
+
+    @client.on(ServerMessageType.ADD_TRANSCRIPT)
+    def on_final(msg):
+        results = msg.get("results", [])
+        parsed = parse_speaker_texts(results)
+        for speaker, text in parsed.items():
+            speaker_accumulated[speaker] = (speaker_accumulated.get(speaker, "") + " " + text).strip()
+            if text and not closed:
+                loop = asyncio.get_event_loop()
+                loop.create_task(ws.send_json({"type": "confirmed_transcript", "speaker": speaker, "text": text}))
+
+    @client.on(ServerMessageType.ADD_PARTIAL_TRANSCRIPT)
+    def on_partial(msg):
+        transcript = TranscriptResult.from_message(msg).metadata.transcript or ""
+        if transcript and not closed:
+            loop = asyncio.get_event_loop()
+            loop.create_task(ws.send_json({"type": "partial_transcript", "speaker": "default", "text": transcript}))
+
+    try:
+        await client.start_session(
+            transcription_config=TranscriptionConfig(
+                language=source_lang,
+                enable_partials=True,
+                operating_point=OperatingPoint.ENHANCED,
+                diarization="speaker",
+                speaker_diarization_config={"max_speakers": 10},
+            ),
+            audio_format=AudioFormat(encoding="pcm_s16le", chunk_size=4096, sample_rate=16000),
+        )
+        await ws.send_json({"type": "session_started", "data": {"status": "connected"}})
+
+        while True:
+            message = await ws.receive()
+            if "text" not in message:
+                continue
+            data = json.loads(message["text"])
+            if data.get("type") == "audio_chunk":
+                audio = base64.b64decode(data.get("audio_base_64", ""))
+                await client.send_audio(audio)
+            elif data.get("type") == "end_stream":
+                break
+
+    except WebSocketDisconnect:
+        print("👋 Disconnected (transcript-only)")
     except Exception as e:
         print(f"❌ {type(e).__name__}: {e}")
     finally:

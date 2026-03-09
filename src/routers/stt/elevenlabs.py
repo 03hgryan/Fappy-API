@@ -9,6 +9,7 @@ import json
 import time
 import asyncio
 import websockets
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from utils.tone import ToneDetector
 from utils.speaker_pipeline import SpeakerPipeline
@@ -44,7 +45,11 @@ async def stream(ws: WebSocket):
     translator_type = ws.query_params.get("translator", "realtime")
     use_realtime = translator_type == "realtime"
     use_deepl = translator_type == "deepl"
-    tone_detector = ToneDetector(target_lang=target_lang)
+    async def on_tone_detected(tone: str):
+        if not closed:
+            await ws.send_json({"type": "tone_detected", "tone": tone})
+
+    tone_detector = ToneDetector(target_lang=target_lang, on_detected=on_tone_detected)
 
     committed_text = ""
     current_partial = ""
@@ -174,6 +179,7 @@ async def stream(ws: WebSocket):
         session_msg = await elevenlabs_ws.recv()
         session_data = json.loads(session_msg)
         await ws.send_json({"type": "session_started", "data": session_data})
+        await ws.send_json({"type": "tone_detecting"})
 
         await asyncio.gather(
             forward_audio(elevenlabs_ws),
@@ -187,6 +193,110 @@ async def stream(ws: WebSocket):
         await ws.send_json({"type": "error", "message": str(e)})
     except WebSocketDisconnect:
         print("Disconnected")
+    except Exception as e:
+        print(f"{type(e).__name__}: {e}")
+    finally:
+        closed = True
+        if elevenlabs_ws:
+            await elevenlabs_ws.close()
+
+
+@router.websocket("/transcript")
+async def stream_transcript_only(ws: WebSocket):
+    """Transcription only — no translation pipeline."""
+    await ws.accept()
+    user = await require_ws_auth(ws)
+    if AUTH_ENABLED and user is None:
+        return
+
+    if not ELEVENLABS_API_KEY:
+        await ws.send_json({"type": "error", "message": "ELEVENLABS_API_KEY not configured"})
+        await ws.close()
+        return
+
+    closed = False
+    prev_partial = ""
+    committed_text = ""  # all committed segments; used to restore context after EL resets its partial
+
+    def trim_recent(text: str) -> str:
+        """
+        Keep at most 3 completed sentences + the current in-progress words.
+        A sentence boundary is any .?! followed by a space.
+        When more than 3 boundaries exist, drop everything up to and including
+        the 4th-from-last boundary so exactly 3 remain.
+        """
+        boundaries = [i for i in range(len(text) - 1) if text[i] in ".?!" and text[i + 1] == " "]
+        if len(boundaries) > 3:
+            cut = boundaries[-4] + 2   # start of the 3rd-from-last sentence
+            return text[cut:]
+        return text
+
+    async def forward_audio(elevenlabs_ws):
+        try:
+            while True:
+                message = await ws.receive()
+                if "text" not in message:
+                    continue
+                data = json.loads(message["text"])
+                if data.get("type") == "audio_chunk":
+                    await elevenlabs_ws.send(json.dumps({
+                        "message_type": "input_audio_chunk",
+                        "audio_base_64": data.get("audio_base_64", ""),
+                        "commit": False,
+                        "sample_rate": 16000,
+                    }))
+                elif data.get("type") == "end_stream":
+                    await elevenlabs_ws.send(json.dumps({
+                        "message_type": "input_audio_chunk",
+                        "audio_base_64": "",
+                        "commit": True,
+                        "sample_rate": 16000,
+                    }))
+                    break
+        except WebSocketDisconnect:
+            pass
+
+    async def forward_transcripts(elevenlabs_ws):
+        nonlocal committed_text, prev_partial, closed
+        try:
+            async for message in elevenlabs_ws:
+                data = json.loads(message)
+                msg_type = data.get("message_type", "")
+                text = data.get("text", "").strip()
+
+                if msg_type == "committed_transcript":
+                    committed_text = (committed_text + " " + text).strip() if committed_text else text
+                    print(f"[EL committed] {text}")
+                elif msg_type == "partial_transcript":
+                    full = trim_recent((committed_text + " " + text).strip() if committed_text else text)
+                    if full and full != prev_partial:
+                        prev_partial = full
+                        if not closed:
+                            print(f"[EL partial  ] {full}")
+                            await ws.send_json({"type": "partial_transcript", "speaker": "default", "text": full})
+        except websockets.ConnectionClosed:
+            pass
+
+    elevenlabs_ws = None
+    try:
+        elevenlabs_ws = await asyncio.wait_for(
+            websockets.connect(
+                ELEVENLABS_URL,
+                additional_headers={"xi-api-key": ELEVENLABS_API_KEY},
+            ),
+            timeout=CONNECTION_TIMEOUT,
+        )
+        session_msg = await elevenlabs_ws.recv()
+        session_data = json.loads(session_msg)
+        await ws.send_json({"type": "session_started", "data": session_data})
+        await asyncio.gather(forward_audio(elevenlabs_ws), forward_transcripts(elevenlabs_ws))
+
+    except asyncio.TimeoutError:
+        await ws.send_json({"type": "error", "message": "ElevenLabs connection timeout"})
+    except websockets.InvalidStatusCode as e:
+        await ws.send_json({"type": "error", "message": str(e)})
+    except WebSocketDisconnect:
+        print("Disconnected (transcript-only)")
     except Exception as e:
         print(f"{type(e).__name__}: {e}")
     finally:

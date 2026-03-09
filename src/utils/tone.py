@@ -67,7 +67,7 @@ DEFAULT_TONE = "casual_polite"
 
 
 class ToneDetector:
-    def __init__(self, target_lang: str = "Korean"):
+    def __init__(self, target_lang: str = "Korean", on_detected=None):
         self.target_lang = target_lang
         self.tone_instructions = TONE_INSTRUCTIONS_BY_LANG.get(target_lang, TONE_INSTRUCTIONS_GENERIC)
         self.word_buffer: list[str] = []
@@ -75,6 +75,7 @@ class ToneDetector:
         self.detected = False
         self._detecting = False
         self._detect_task: asyncio.Task | None = None
+        self.on_detected = on_detected  # async callback(tone: str) fired once when tone is locked
 
     def feed_text(self, text: str):
         """Feed transcript text. Triggers detection after ~50 words."""
@@ -107,6 +108,8 @@ class ToneDetector:
                 self.current_tone = result
                 self.detected = True
                 print(f"🎭 Tone detected: {old} → {result} (from {len(self.word_buffer)}w)")
+                if self.on_detected:
+                    asyncio.create_task(self.on_detected(result))
             else:
                 print(f"🎭 Tone detection unclear: '{result}', keeping {self.current_tone}")
                 self._detecting = False  # Retry later

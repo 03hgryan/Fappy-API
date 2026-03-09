@@ -29,7 +29,7 @@ app = FastAPI(
 )
 
 # CORS configuration
-origins = os.getenv("ALLOWED_ORIGINS", "https://typingo.dev,https://www.typingo.dev,http://localhost:5173,http://localhost:3000,http://localhost:8000").split(",")
+origins = os.getenv("ALLOWED_ORIGINS").split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -43,7 +43,7 @@ app.add_middleware(
 async def root():
     return {
         "message": "API for AST",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "docs": "/docs",
         "endpoints": {
             "websocket": "/ws/stream",
