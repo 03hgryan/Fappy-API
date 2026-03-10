@@ -69,7 +69,10 @@ async def google_callback(
         _, ext_redirect = state.split("|", 1)
 
     # Determine callback URL (must exactly match what was used in /login)
-    callback_url = str(request.url).split("?")[0]
+    # Use X-Forwarded-Proto if behind a proxy (e.g. Cloud Run) to ensure https://
+    url = request.url
+    scheme = request.headers.get("x-forwarded-proto", url.scheme)
+    callback_url = f"{scheme}://{url.netloc}{url.path}"
 
     # Exchange code for tokens
     async with httpx.AsyncClient() as client:
